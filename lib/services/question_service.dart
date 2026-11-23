@@ -1,7 +1,107 @@
+import 'dart:math';
+
 import '../models/practice_question.dart';
+import 'learning_repository.dart';
 
 abstract class QuestionService {
   Future<List<PracticeQuestion>> fetchQuestions();
+}
+
+class ServerQuestionService implements QuestionService {
+  static const defaultQuestionLimit = 5;
+  final String unit;
+  final String? skillCode;
+  final String? problemCode;
+  final int? problemId;
+  final String usage;
+  final LearningRepository? repository;
+  final int questionLimit;
+  final Random? random;
+  const ServerQuestionService({
+    this.unit = '다항식',
+    this.skillCode,
+    this.problemCode,
+    this.problemId,
+    this.usage = 'PRACTICE',
+    this.repository,
+    this.questionLimit = defaultQuestionLimit,
+    this.random,
+  }) : assert(questionLimit > 0);
+
+  @override
+  Future<List<PracticeQuestion>> fetchQuestions() async {
+    final repo = repository ?? LearningRepository();
+    if (problemId != null) {
+      final result = await repo.get('/api/v1/problems/$problemId');
+      if (result['id'] != problemId) {
+        throw const FormatException('요청한 문제와 응답이 다릅니다.');
+      }
+      return [PracticeQuestion.fromServerJson(result, title: unit)];
+    }
+    final codes = <String>{};
+    if (skillCode == null && problemCode == null) {
+      final concepts = await repo.all('/api/v1/concepts');
+      codes.addAll(
+        concepts.where((c) => c['subject'] == unit).map((c) => '${c['code']}'),
+      );
+      if (codes.isEmpty) {
+        throw const FormatException('이 단원의 서버 문제는 아직 준비 중이에요.');
+      }
+    }
+    final questions = <PracticeQuestion>[], seen = <int>{};
+    var page = 1;
+    while (true) {
+      final response = await repo.get('/api/v1/problems', {
+        'page': '$page',
+        'size': '100',
+        'skill_code': ?skillCode,
+        if (problemCode == null) 'usage': usage,
+      });
+      final rows = LearningRepository.items(response);
+      for (final row in rows) {
+        // Exact history retries keep the original problem; new sessions use
+        // their intended pool rather than exposing diagnostic items in practice.
+        if (problemCode == null && row['usage'] != usage) continue;
+        final matches = problemCode != null
+            ? row['problem_code'] == problemCode
+            : skillCode != null
+            ? (row['skill_codes'] is List &&
+                  (row['skill_codes'] as List).contains(skillCode))
+            : (row['concept_codes'] is List &&
+                  (row['concept_codes'] as List).any(codes.contains));
+        if (matches) {
+          final q = PracticeQuestion.fromServerJson(row, title: unit);
+          if (seen.add(q.problemId!)) questions.add(q);
+        }
+      }
+      if (rows.isEmpty || page >= (response['total_pages'] as num? ?? 1)) break;
+      page++;
+    }
+    if (questions.isEmpty) {
+      throw const FormatException('이 단원에 등록된 서버 문제가 아직 없어요.');
+    }
+    if (questions.length <= questionLimit) return questions;
+    // Select a short session from the catalog; the backend still grades every
+    // answer. Prefer distinct Skills before filling any remaining places.
+    final candidates = List<PracticeQuestion>.of(questions)
+      ..shuffle(random ?? Random());
+    final selected = <PracticeQuestion>[],
+        represented = <String>{},
+        selectedIds = <int>{};
+    for (final q in candidates) {
+      final key = q.skillCodes.firstOrNull ?? 'problem:${q.problemId}';
+      if (represented.add(key)) {
+        selected.add(q);
+        selectedIds.add(q.problemId!);
+        if (selected.length == questionLimit) return selected;
+      }
+    }
+    for (final q in candidates) {
+      if (selectedIds.add(q.problemId!)) selected.add(q);
+      if (selected.length == questionLimit) break;
+    }
+    return selected;
+  }
 }
 
 class MockQuestionService implements QuestionService {

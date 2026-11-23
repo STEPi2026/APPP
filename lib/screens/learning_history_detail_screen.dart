@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
-import '../services/learning_storage.dart';
-import 'problem_screen.dart';
+import '../services/learning_repository.dart';
+import '../services/student_learning_records.dart';
+import 'recorded_problem_route.dart';
+import 'captured_history_screen.dart';
 
 class LearningHistoryDetailScreen extends StatefulWidget {
+  final LearningRepository? repository;
   final Map<String, dynamic> record;
   final int? onlyQuestionNumber;
 
@@ -11,6 +14,7 @@ class LearningHistoryDetailScreen extends StatefulWidget {
     super.key,
     required this.record,
     this.onlyQuestionNumber,
+    this.repository,
   });
 
   @override
@@ -38,108 +42,41 @@ class _LearningHistoryDetailScreenState
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  void _showRetryUnavailable() {
-    _showMessage(
-      '이 기록에는 다시 풀기에 필요한 정보가 없어요. '
-      '새로 학습한 문제부터 이용할 수 있어요.',
-    );
-  }
+  late final _repo = widget.repository ?? LearningRepository();
 
-  Future<void> _reloadRecord() async {
-    final records = await LearningStorage.loadSessions();
-    final completedAt = _record['completedAt']?.toString();
-
-    Map<String, dynamic>? updatedRecord;
-
-    for (final record in records) {
-      if (record['completedAt']?.toString() == completedAt) {
-        updatedRecord = record;
-        break;
-      }
-    }
-
-    if (updatedRecord == null) {
-      throw StateError('학습 기록을 찾지 못했습니다.');
-    }
-
-    if (!mounted) return;
-
-    final latestRecord = updatedRecord;
-
-    setState(() {
-      _record = Map<String, dynamic>.from(latestRecord);
-    });
-  }
-
-  Future<void> _retryQuestion(
-    Map<String, dynamic> answer,
-    int fallbackQuestionNumber,
-  ) async {
-    if (_openingReview) return;
-
-    final completedAt = _record['completedAt']?.toString();
-    final questionNumber = int.tryParse(
-      '${answer['questionNumber'] ?? fallbackQuestionNumber}',
-    );
-
-    if (completedAt == null || completedAt.isEmpty || questionNumber == null) {
-      _showRetryUnavailable();
-      return;
-    }
-
-    late final PracticeQuestion question;
-
+  Future<void> _practice(Map<String, dynamic> answer) async {
+    if (_openingReview || answer['problemId'] is! int) return;
+    setState(() => _openingReview = true);
     try {
-      final rawCorrectIndex = answer['correctIndex'];
-
-      question = PracticeQuestion.fromJson({
-        ...answer,
-        'title': answer['title']?.toString() ?? '오답 복습',
-        'question': answer['question']?.toString() ?? '',
-        'explanation': answer['explanation']?.toString() ?? '해설이 없어요.',
-        'correctIndex': rawCorrectIndex is int
-            ? rawCorrectIndex
-            : int.tryParse(rawCorrectIndex?.toString() ?? '') ?? -1,
-      });
-    } catch (_) {
-      _showRetryUnavailable();
-      return;
-    }
-
-    setState(() {
-      _openingReview = true;
-    });
-
-    try {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (context) => ProblemScreen(
-            topic: _record['topic']?.toString() ?? '오답 복습',
-            reviewQuestion: question,
-            onReviewCompleted: () {
-              return LearningStorage.markReviewCompleted(
-                completedAt: completedAt,
-                questionNumber: questionNumber,
-              );
-            },
-          ),
-        ),
-      );
-
-      if (!mounted) return;
-
-      await _reloadRecord();
-    } catch (_) {
-      _showMessage(
-        '복습 화면을 열거나 최신 상태를 불러오지 못했어요. '
-        '학습 기록으로 나갔다가 다시 들어와 주세요.',
-      );
+      await openRelatedPractice(context, _repo, problemId: answer['problemId']);
     } finally {
-      if (mounted) {
-        setState(() {
-          _openingReview = false;
-        });
-      }
+      if (mounted) setState(() => _openingReview = false);
+    }
+  }
+
+  Future<void> _retryQuestion(Map<String, dynamic> answer) async {
+    final id = answer['problemId'];
+    if (_openingReview || id is! int) return;
+    setState(() => _openingReview = true);
+    try {
+      await openRecordedProblem(context, id, _repo);
+      if (!mounted) return;
+      final rows = await StudentLearningRecords(_repo).wrongRows();
+      final states = {
+        for (final row in rows) row['problem_id']: row['resolved'],
+      };
+      if (!mounted) return;
+      setState(() {
+        for (final item in (_record['answers'] as List).whereType<Map>()) {
+          if (states.containsKey(item['problemId'])) {
+            item['reviewCompleted'] = states[item['problemId']];
+          }
+        }
+      });
+    } catch (e) {
+      _showMessage(learningError(e));
+    } finally {
+      if (mounted) setState(() => _openingReview = false);
     }
   }
 
@@ -198,11 +135,16 @@ class _LearningHistoryDetailScreenState
 
                 final isCorrect = answer['isCorrect'] == true;
                 final isWrong = answer['isCorrect'] == false;
+                final isPartial =
+                    answer['isCorrect'] == null &&
+                    answer['isPartialSolution'] == true;
                 final reviewCompleted = answer['reviewCompleted'] == true;
 
                 final resultColor = isCorrect
                     ? const Color(0xFF278B4B)
-                    : const Color(0xFFC94B4B);
+                    : isWrong
+                    ? const Color(0xFFC94B4B)
+                    : const Color(0xFF777777);
 
                 final reviewColor = reviewCompleted
                     ? const Color(0xFF278B4B)
@@ -232,7 +174,13 @@ class _LearningHistoryDetailScreenState
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           Text(
-                            isCorrect ? '첫 풀이: 정답' : '첫 풀이: 오답',
+                            isCorrect
+                                ? '정답'
+                                : isWrong
+                                ? '오답'
+                                : isPartial
+                                ? '풀이가 끝나지 않았어요'
+                                : '판정 보류',
                             style: TextStyle(
                               color: resultColor,
                               fontWeight: FontWeight.bold,
@@ -240,7 +188,11 @@ class _LearningHistoryDetailScreenState
                           ),
                           if (isWrong)
                             Text(
-                              reviewCompleted ? '복습 완료 ✓' : '미복습',
+                              reviewCompleted
+                                  ? '복습 완료 ✓'
+                                  : answer['reviewCompleted'] == false
+                                  ? '미복습'
+                                  : '복습 상태 확인 불가',
                               style: TextStyle(
                                 color: reviewColor,
                                 fontWeight: FontWeight.bold,
@@ -251,7 +203,7 @@ class _LearningHistoryDetailScreenState
                       if (isWrong && reviewCompleted) ...[
                         const SizedBox(height: 8),
                         const Text(
-                          '다시 풀어 정답을 맞힌 문제예요.',
+                          '복습이 완료된 문제예요.',
                           style: TextStyle(
                             fontSize: 13,
                             color: Color(0xFF278B4B),
@@ -273,7 +225,7 @@ class _LearningHistoryDetailScreenState
                       ),
                       const SizedBox(height: 20),
                       Text(
-                        '처음 제출한 답: '
+                        '제출한 답: '
                         '${answer['selectedAnswer'] ?? '정보 없음'}',
                         style: TextStyle(
                           fontSize: 16,
@@ -304,14 +256,14 @@ class _LearningHistoryDetailScreenState
                         answer['explanation']?.toString() ?? '해설이 없어요.',
                         style: const TextStyle(fontSize: 15, height: 1.6),
                       ),
-                      if (isWrong) ...[
+                      if (answer['problemId'] is int) ...[
                         const SizedBox(height: 24),
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton(
                             onPressed: _openingReview
                                 ? null
-                                : () => _retryQuestion(answer, index + 1),
+                                : () => _retryQuestion(answer),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: reviewCompleted
                                   ? const Color(0xFF278B4B)
@@ -324,13 +276,43 @@ class _LearningHistoryDetailScreenState
                               ),
                             ),
                             child: Text(
-                              reviewCompleted ? '복습 완료 · 한 번 더 풀기' : '오답 다시 풀기',
+                              isWrong
+                                  ? (reviewCompleted
+                                        ? '복습 완료 · 한 번 더 풀기'
+                                        : '오답 다시 풀기')
+                                  : '원래 문제 다시 풀기',
                               style: const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
                           ),
+                        ),
+                      ],
+                      if (answer['problemId'] is int) ...[
+                        const SizedBox(height: 10),
+                        OutlinedButton.icon(
+                          onPressed: _openingReview
+                              ? null
+                              : () => _practice(answer),
+                          icon: const Icon(Icons.auto_awesome_rounded),
+                          label: const Text('같은 개념의 다른 문제 풀기'),
+                        ),
+                      ],
+                      if (answer['capturedProblemId'] is int) ...[
+                        const SizedBox(height: 16),
+                        OutlinedButton.icon(
+                          onPressed: () => Navigator.push(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (_) => SavedCaptureScreen(
+                                captureId: answer['capturedProblemId'],
+                                repository: _repo,
+                              ),
+                            ),
+                          ),
+                          icon: const Icon(Icons.photo_library_outlined),
+                          label: const Text('사진과 분석 결과 다시 보기'),
                         ),
                       ],
                     ],

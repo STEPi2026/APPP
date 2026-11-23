@@ -1,6 +1,8 @@
-// 학생용 APP 전용 로그인 · 회원가입 화면 (STEPi 앱 기능명세서 R8~R21 반영)
-// 학부모·선생님은 별도 WEB 담당 파트로 분리되어 있으므로, 앱에서는 WEB 접속 안내 모달(R8)만 띄웁니다.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import '../widgets/stepi_logo.dart';
 
 import '../main.dart';
 import '../services/api.dart';
@@ -19,26 +21,28 @@ class _LoginScreenState extends State<LoginScreen> {
   static const _accentOrange = Color(0xFFFF8A3D);
   static const _mutedColor = Color(0xFF777777);
 
-  // false: 학생 로그인, true: 학생 회원가입
   bool _isSignUpMode = false;
 
+  // 기본값은 비워 둡니다.
+  // 회원가입한 실제 계정으로 로그인하세요.
   final _nameController = TextEditingController();
-  final _emailController = TextEditingController(text: 'student@stepi.kr');
-  final _passwordController = TextEditingController(text: 'stepi1234!');
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   final _passwordConfirmController = TextEditingController();
-  final _learningGoalController = TextEditingController(
-    text: '다항식과 방정식 오개념 완벽 정복',
-  );
-
-  String _selectedGrade = '고등학교 1학년';
-  static const _grades = <String>['고등학교 1학년', '중학교 3학년', '중학교 2학년', '중학교 1학년'];
 
   bool _emailChecked = false;
+  String? _checkedEmail;
+
   bool _agreeTerms = false;
   bool _agreePrivacy = false;
+
   bool _submitting = false;
+  bool _checkingEmail = false;
   bool _obscurePassword = true;
+
   String? _errorText;
+
+  bool get _busy => _submitting || _checkingEmail;
 
   static final RegExp _emailRegex = RegExp(
     r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
@@ -50,12 +54,12 @@ class _LoginScreenState extends State<LoginScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _passwordConfirmController.dispose();
-    _learningGoalController.dispose();
     super.dispose();
   }
 
   void _showToast(String message) {
     if (!mounted) return;
+
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -63,61 +67,154 @@ class _LoginScreenState extends State<LoginScreen> {
       );
   }
 
-  /// 앱 명세서 R18: 이메일 중복 확인
-  Future<void> _checkDuplicateEmail() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) {
-      setState(() => _errorText = '이메일을 입력해주세요.');
-      return;
+  void _setError(String message) {
+    if (!mounted) return;
+    setState(() => _errorText = message);
+  }
+
+  String _errorMessage(Object error) {
+    if (error is TimeoutException) {
+      return '서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
     }
-    if (!_emailRegex.hasMatch(email)) {
-      setState(() => _errorText = '올바른 이메일 형식을 입력해주세요.');
+
+    if (error is ApiException) {
+      switch (error.statusCode) {
+        case 400:
+          return '입력한 내용을 확인해주세요.';
+        case 401:
+          return '인증에 실패했습니다. 다시 로그인해주세요.';
+        case 403:
+          return '이 기능에 접근할 권한이 없습니다.';
+        case 404:
+          return '요청한 API를 찾을 수 없습니다. 서버 주소를 확인해주세요.';
+        case 409:
+          return '이미 등록된 정보입니다. 입력한 내용을 확인해주세요.';
+        case 422:
+          return '입력한 정보의 형식이나 길이를 확인해주세요.';
+        case 429:
+          return '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.';
+        default:
+          if (error.statusCode >= 500) {
+            return '서버에서 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
+          }
+          return error.message;
+      }
+    }
+
+    return '서버에 연결하지 못했습니다. '
+        '인터넷 연결과 서버 주소를 확인해주세요. '
+        '웹에서는 CORS 설정도 확인이 필요합니다.';
+  }
+
+  void _changeMode(bool signUp) {
+    if (_busy) return;
+
+    setState(() {
+      _isSignUpMode = signUp;
+      _errorText = null;
+    });
+  }
+
+  // --------------------------------------------------
+  // 이메일 중복 확인
+  // --------------------------------------------------
+
+  Future<void> _checkDuplicateEmail() async {
+    if (_busy) return;
+
+    FocusScope.of(context).unfocus();
+
+    final email = _emailController.text.trim();
+
+    if (email.isEmpty || !_emailRegex.hasMatch(email)) {
+      _setError('올바른 이메일을 입력해주세요.');
       return;
     }
 
-    if (Api.isBackendConfigured) {
-      try {
-        await Api.get(
-          Api.checkEmailEndpoint,
-          queryParameters: {'email': email},
-        );
-      } on ApiException catch (e) {
-        if (e.statusCode == 409) {
-          setState(() {
-            _emailChecked = false;
-            _errorText = '이미 사용 중인 이메일입니다.';
-          });
-          return;
-        }
-      } catch (_) {}
+    if (!Api.isBackendConfigured) {
+      _setError('서버 주소가 설정되지 않았습니다.');
+      return;
     }
 
     setState(() {
-      _emailChecked = true;
+      _checkingEmail = true;
+      _emailChecked = false;
+      _checkedEmail = null;
       _errorText = null;
     });
-    _showToast('사용 가능한 이메일입니다.');
+
+    try {
+      final result = await Api.get(
+        Api.checkEmailEndpoint,
+        queryParameters: {'email': email},
+      );
+
+      if (!mounted) return;
+
+      // API 응답:
+      // {"email": "...", "available": true 또는 false}
+      if (result is! Map || result['available'] is! bool) {
+        _setError('이메일 확인 응답 형식이 올바르지 않습니다.');
+        return;
+      }
+
+      if (result['available'] != true) {
+        _setError('이미 사용 중인 이메일입니다.');
+        return;
+      }
+
+      // 확인 요청 중 이메일이 변경됐다면 확인 결과를 적용하지 않습니다.
+      if (_emailController.text.trim() != email) {
+        _setError('이메일이 변경되었습니다. 다시 중복 확인해주세요.');
+        return;
+      }
+
+      setState(() {
+        _emailChecked = true;
+        _checkedEmail = email;
+        _errorText = null;
+      });
+
+      _showToast('사용 가능한 이메일입니다.');
+    } on ApiException catch (e) {
+      if (e.statusCode == 409) {
+        _setError('이미 사용 중인 이메일입니다.');
+      } else {
+        _setError(_errorMessage(e));
+      }
+    } catch (e) {
+      _setError(_errorMessage(e));
+    } finally {
+      if (mounted) {
+        setState(() => _checkingEmail = false);
+      }
+    }
   }
 
-  /// 앱 명세서 R9~R15: 학생 로그인 실행
+  // --------------------------------------------------
+  // 로그인
+  // --------------------------------------------------
+
   Future<void> _handleLogin() async {
+    if (_busy) return;
+
+    FocusScope.of(context).unfocus();
+
     final email = _emailController.text.trim();
     final password = _passwordController.text;
 
-    if (email.isEmpty) {
-      setState(() => _errorText = '이메일을 입력해주세요.');
+    if (email.isEmpty || !_emailRegex.hasMatch(email)) {
+      _setError('올바른 이메일을 입력해주세요.');
       return;
     }
-    if (!_emailRegex.hasMatch(email)) {
-      setState(() => _errorText = '올바른 이메일 형식을 입력해주세요.');
-      return;
-    }
+
     if (password.isEmpty) {
-      setState(() => _errorText = '비밀번호를 입력해주세요.');
+      _setError('비밀번호를 입력해주세요.');
       return;
     }
-    if (password.length < 8) {
-      setState(() => _errorText = '비밀번호는 8자 이상 입력해주세요.');
+
+    if (!Api.isBackendConfigured) {
+      _setError('서버 주소가 설정되지 않았습니다.');
       return;
     }
 
@@ -126,92 +223,111 @@ class _LoginScreenState extends State<LoginScreen> {
       _errorText = null;
     });
 
+    bool loggedIn = false;
+    bool studentVerified = false;
+
     try {
-      if (Api.isBackendConfigured) {
-        final response = await Api.post(
-          Api.loginEndpoint,
-          body: {'email': email, 'password': password, 'role': 'STUDENT'},
-        );
+      // 로그인 성공 시 api.dart 내부에서 두 토큰을 저장합니다.
+      await Api.login(email: email, password: password);
 
-        if (response is Map) {
-          final serverRole = response['role']?.toString();
-          if (serverRole != null &&
-              serverRole.isNotEmpty &&
-              serverRole != 'STUDENT') {
-            setState(() {
-              _submitting = false;
-              _errorText = '선생님/학부모 계정은 전용 WEB에서 로그인해 주세요.';
-            });
-            return;
-          }
+      loggedIn = true;
 
-          final token =
-              response['access_token']?.toString() ??
-              response['token']?.toString();
-          if (token != null && token.isNotEmpty) {
-            Api.setAccessToken(token);
-          }
+      // 로그인 응답에는 role이 없으므로 내 정보 API에서 확인합니다.
+      final me = await Api.getMe();
+      final role = me['role']?.toString().toUpperCase();
+
+      if (role != 'STUDENT') {
+        Api.clearTokens();
+
+        if (!mounted) return;
+
+        if (role == 'PARENT' || role == 'TEACHER') {
+          _setError('선생님/학부모 계정은 전용 WEB에서 로그인해주세요.');
+          _showWebRedirectModal();
+        } else {
+          _setError('계정의 학생 권한을 확인하지 못했습니다.');
         }
-      } else {
-        await Future<void>.delayed(const Duration(milliseconds: 350));
+
+        return;
       }
 
+      studentVerified = true;
+
       if (!mounted) return;
-      setState(() => _submitting = false);
 
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(builder: (context) => const MainScreen()),
       );
     } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        if (e.statusCode == 404) {
-          _errorText = '가입되지 않은 계정입니다. 회원가입을 먼저 진행해주세요.';
-        } else if (e.statusCode == 401) {
-          _errorText = '비밀번호가 일치하지 않습니다.';
-        } else {
-          _errorText = '로그인에 실패했습니다. 잠시 후 다시 시도해주세요.';
-        }
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _errorText = '로그인에 실패했습니다. 잠시 후 다시 시도해주세요.';
-      });
+      if (e.statusCode == 401) {
+        _setError(
+          loggedIn
+              ? '로그인 인증을 확인하지 못했습니다. 다시 시도해주세요.'
+              : '이메일 또는 비밀번호가 올바르지 않습니다.',
+        );
+      } else {
+        _setError(_errorMessage(e));
+      }
+    } catch (e) {
+      _setError(_errorMessage(e));
+    } finally {
+      // 학생 확인까지 완료되지 않았다면 인증 정보를 남기지 않습니다.
+      if (loggedIn && !studentVerified) {
+        Api.clearTokens();
+      }
+
+      if (mounted) {
+        setState(() => _submitting = false);
+      }
     }
   }
 
-  /// 앱 명세서 R16~R21: 학생 회원가입 실행
+  // --------------------------------------------------
+  // 회원가입
+  // --------------------------------------------------
+
   Future<void> _handleSignUp() async {
+    if (_busy) return;
+
+    FocusScope.of(context).unfocus();
+
     final name = _nameController.text.trim();
     final email = _emailController.text.trim();
     final password = _passwordController.text;
     final confirm = _passwordConfirmController.text;
 
-    if (name.isEmpty) {
-      setState(() => _errorText = '이름을 입력해주세요.');
+    if (name.isEmpty || name.length > 100) {
+      _setError('이름은 1~100자로 입력해주세요.');
       return;
     }
+
     if (email.isEmpty || !_emailRegex.hasMatch(email)) {
-      setState(() => _errorText = '올바른 이메일 형식을 입력해주세요.');
+      _setError('올바른 이메일을 입력해주세요.');
       return;
     }
-    if (!_emailChecked) {
-      setState(() => _errorText = '이메일 중복 확인을 먼저 진행해주세요.');
+
+    if (!_emailChecked || _checkedEmail != email) {
+      _setError('이메일 중복 확인을 먼저 진행해주세요.');
       return;
     }
-    if (password.length < 8) {
-      setState(() => _errorText = '비밀번호는 8자 이상 입력해주세요.');
+
+    if (password.length < 8 || password.length > 128) {
+      _setError('비밀번호는 8~128자로 입력해주세요.');
       return;
     }
+
     if (password != confirm) {
-      setState(() => _errorText = '비밀번호가 일치하지 않습니다.');
+      _setError('비밀번호가 일치하지 않습니다.');
       return;
     }
+
     if (!_agreeTerms || !_agreePrivacy) {
-      setState(() => _errorText = '[필수] 약관에 동의해주세요.');
+      _setError('필수 약관에 모두 동의해주세요.');
+      return;
+    }
+
+    if (!Api.isBackendConfigured) {
+      _setError('서버 주소가 설정되지 않았습니다.');
       return;
     }
 
@@ -221,39 +337,57 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      if (Api.isBackendConfigured) {
-        await Api.post(
-          '/api/v1/auth/signup',
-          body: {
-            'name': name,
-            'email': email,
-            'password': password,
-            'role': 'STUDENT',
-            'grade_level': _selectedGrade,
-            'learning_goal': _learningGoalController.text.trim(),
-          },
-        );
-      } else {
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-      }
+      // API 명세에 있는 회원가입 필드만 전송합니다.
+      await Api.signup(
+        email: email,
+        password: password,
+        name: name,
+        role: 'STUDENT',
+      );
 
       if (!mounted) return;
+
       setState(() {
-        _submitting = false;
         _isSignUpMode = false;
+        _emailChecked = false;
+        _checkedEmail = null;
+        _agreeTerms = false;
+        _agreePrivacy = false;
+        _errorText = null;
       });
+
+      _passwordConfirmController.clear();
+
+      // 이메일과 비밀번호 입력은 유지하므로 바로 로그인할 수 있습니다.
       _showToast('회원가입이 완료되었습니다. 로그인해주세요!');
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _errorText = '회원가입 요청 중 오류가 발생했습니다. 다시 시도해주세요.';
-      });
+    } on ApiException catch (e) {
+      if (e.statusCode == 409) {
+        if (!mounted) return;
+
+        setState(() {
+          _emailChecked = false;
+          _checkedEmail = null;
+          _errorText = '이미 가입된 이메일입니다. 로그인해주세요.';
+        });
+      } else {
+        _setError(_errorMessage(e));
+      }
+    } catch (e) {
+      _setError(_errorMessage(e));
+    } finally {
+      if (mounted) {
+        setState(() => _submitting = false);
+      }
     }
   }
 
-  /// 앱 명세서 R8: 선생님/학부모 선택 시 관리자 WEB 유도 안내 팝업 노출
+  // --------------------------------------------------
+  // 선생님 / 학부모 안내
+  // --------------------------------------------------
+
   void _showWebRedirectModal() {
+    if (!mounted) return;
+
     showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -261,20 +395,13 @@ class _LoginScreenState extends State<LoginScreen> {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(22),
           ),
-          title: const Row(
-            children: [
-              Icon(Icons.language_rounded, color: _deepPurple),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  '선생님 · 학부모 WEB 안내',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
-                ),
-              ),
-            ],
+          title: const Text(
+            '선생님 · 학부모 WEB 안내',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
           ),
           content: const Text(
-            '선생님/학부모님은 전용 WEB 대시보드에서 학생의 학습 현황, 오개념 분석, 학습 리포트를 관리할 수 있어요!\n\nPC 또는 모바일 브라우저에서 STEPi 관리자 웹으로 접속해 주세요.',
+            '이 앱은 학생용입니다.\n\n'
+            '선생님과 학부모님은 전용 WEB 대시보드를 이용해주세요.',
             style: TextStyle(fontSize: 14, height: 1.55),
           ),
           actions: [
@@ -289,6 +416,10 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // --------------------------------------------------
+  // 화면
+  // --------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -302,20 +433,10 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(
-                    Icons.auto_awesome_rounded,
-                    size: 58,
-                    color: _deepPurple,
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'STEPi',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 42,
-                      fontWeight: FontWeight.w900,
-                      color: _deepPurple,
-                      letterSpacing: 1.5,
+                  Transform.translate(
+                    offset: const Offset(0, -24),
+                    child: const Center(
+                      child: StepILogo(width: 248, borderRadius: 14),
                     ),
                   ),
                   const SizedBox(height: 6),
@@ -329,8 +450,6 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 28),
-
-                  // 학생 로그인 / 회원가입 카드
                   Container(
                     padding: const EdgeInsets.all(22),
                     decoration: BoxDecoration(
@@ -353,12 +472,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               child: _buildModeTabButton(
                                 title: '학생 로그인',
                                 active: !_isSignUpMode,
-                                onTap: () {
-                                  setState(() {
-                                    _isSignUpMode = false;
-                                    _errorText = null;
-                                  });
-                                },
+                                onTap: () => _changeMode(false),
                               ),
                             ),
                             const SizedBox(width: 8),
@@ -366,12 +480,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               child: _buildModeTabButton(
                                 title: '회원가입',
                                 active: _isSignUpMode,
-                                onTap: () {
-                                  setState(() {
-                                    _isSignUpMode = true;
-                                    _errorText = null;
-                                  });
-                                },
+                                onTap: () => _changeMode(true),
                               ),
                             ),
                           ],
@@ -381,6 +490,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         if (_isSignUpMode) ...[
                           TextField(
                             controller: _nameController,
+                            enabled: !_busy,
                             decoration: _inputDecoration(
                               label: '이름',
                               hint: '홍길동',
@@ -396,15 +506,19 @@ class _LoginScreenState extends State<LoginScreen> {
                             Expanded(
                               child: TextField(
                                 controller: _emailController,
+                                enabled: !_busy,
                                 keyboardType: TextInputType.emailAddress,
+                                autocorrect: false,
                                 onChanged: (_) {
-                                  if (_emailChecked) {
-                                    setState(() => _emailChecked = false);
-                                  }
+                                  setState(() {
+                                    _emailChecked = false;
+                                    _checkedEmail = null;
+                                    _errorText = null;
+                                  });
                                 },
                                 decoration: _inputDecoration(
-                                  label: '이메일 아이디',
-                                  hint: 'student@stepi.kr',
+                                  label: '이메일',
+                                  hint: 'student@example.com',
                                   icon: Icons.alternate_email_rounded,
                                 ),
                               ),
@@ -414,22 +528,23 @@ class _LoginScreenState extends State<LoginScreen> {
                               SizedBox(
                                 height: 52,
                                 child: OutlinedButton(
-                                  onPressed: _checkDuplicateEmail,
+                                  onPressed: _busy
+                                      ? null
+                                      : _checkDuplicateEmail,
                                   style: OutlinedButton.styleFrom(
                                     foregroundColor: _emailChecked
                                         ? const Color(0xFF278B4B)
                                         : _deepPurple,
-                                    side: BorderSide(
-                                      color: _emailChecked
-                                          ? const Color(0xFF278B4B)
-                                          : _deepPurple,
-                                    ),
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(12),
                                     ),
                                   ),
                                   child: Text(
-                                    _emailChecked ? '확인완료 ✓' : '중복확인',
+                                    _checkingEmail
+                                        ? '확인 중'
+                                        : _emailChecked
+                                        ? '확인완료'
+                                        : '중복확인',
                                     style: const TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.bold,
@@ -444,17 +559,29 @@ class _LoginScreenState extends State<LoginScreen> {
 
                         TextField(
                           controller: _passwordController,
+                          enabled: !_busy,
                           obscureText: _obscurePassword,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          onSubmitted: (_) {
+                            if (!_isSignUpMode && !_busy) {
+                              _handleLogin();
+                            }
+                          },
                           decoration: _inputDecoration(
-                            label: '비밀번호 (8자 이상)',
-                            hint: '비밀번호를 입력해주세요',
+                            label: '비밀번호',
+                            hint: _isSignUpMode
+                                ? '8~128자로 입력해주세요'
+                                : '비밀번호를 입력해주세요',
                             icon: Icons.lock_outline_rounded,
                             suffix: IconButton(
-                              onPressed: () {
-                                setState(() {
-                                  _obscurePassword = !_obscurePassword;
-                                });
-                              },
+                              onPressed: _busy
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _obscurePassword = !_obscurePassword;
+                                      });
+                                    },
                               icon: Icon(
                                 _obscurePassword
                                     ? Icons.visibility_off_outlined
@@ -469,42 +596,14 @@ class _LoginScreenState extends State<LoginScreen> {
                           const SizedBox(height: 12),
                           TextField(
                             controller: _passwordConfirmController,
+                            enabled: !_busy,
                             obscureText: _obscurePassword,
+                            autocorrect: false,
+                            enableSuggestions: false,
                             decoration: _inputDecoration(
                               label: '비밀번호 확인',
                               hint: '비밀번호를 한 번 더 입력해주세요',
                               icon: Icons.lock_reset_rounded,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          DropdownButtonFormField<String>(
-                            initialValue: _selectedGrade,
-                            decoration: _inputDecoration(
-                              label: '학년 선택',
-                              hint: '',
-                              icon: Icons.school_outlined,
-                            ),
-                            items: _grades
-                                .map(
-                                  (g) => DropdownMenuItem<String>(
-                                    value: g,
-                                    child: Text(g),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (val) {
-                              if (val != null) {
-                                setState(() => _selectedGrade = val);
-                              }
-                            },
-                          ),
-                          const SizedBox(height: 12),
-                          TextField(
-                            controller: _learningGoalController,
-                            decoration: _inputDecoration(
-                              label: '나의 학습 목표 (선택)',
-                              hint: '예: 다항식과 이차방정식 완전 정복',
-                              icon: Icons.flag_outlined,
                             ),
                           ),
                           const SizedBox(height: 14),
@@ -532,9 +631,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
                         const SizedBox(height: 18),
                         ElevatedButton(
-                          onPressed: _submitting
+                          onPressed: _busy
                               ? null
-                              : (_isSignUpMode ? _handleSignUp : _handleLogin),
+                              : _isSignUpMode
+                              ? _handleSignUp
+                              : _handleLogin,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: _deepPurple,
                             foregroundColor: Colors.white,
@@ -545,10 +646,8 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                           child: Text(
                             _submitting
-                                ? '로그인 중입니다...'
-                                : _isSignUpMode
-                                ? '학생 계정으로 가입하기'
-                                : '로그인',
+                                ? (_isSignUpMode ? '가입 중입니다...' : '로그인 중입니다...')
+                                : (_isSignUpMode ? '학생 계정으로 가입하기' : '로그인'),
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w800,
@@ -559,10 +658,8 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 14),
-
-                  // 선생님 / 학부모 WEB 유도 안내 버튼 (명세서 R8)
                   TextButton(
-                    onPressed: _showWebRedirectModal,
+                    onPressed: _busy ? null : _showWebRedirectModal,
                     child: const Text(
                       '선생님 / 학부모이신가요? (전용 WEB 안내)',
                       style: TextStyle(
@@ -589,7 +686,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }) {
     return InkWell(
       borderRadius: BorderRadius.circular(12),
-      onTap: onTap,
+      onTap: _busy ? null : onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 11),
         decoration: BoxDecoration(
@@ -616,56 +713,86 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildTermsAgreementBox() {
     final allAgreed = _agreeTerms && _agreePrivacy;
 
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8F9FA),
+    return Material(
+      color: const Color(0xFFF8F9FA),
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
+        side: const BorderSide(color: Color(0xFFE2E8F0)),
       ),
-      child: Column(
-        children: [
-          CheckboxListTile(
-            value: allAgreed,
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: const Text(
-              '전체 약관 동의',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildAgreementRow(
+              value: allAgreed,
+              label: '전체 약관 동의',
+              bold: true,
+              onChanged: (value) {
+                setState(() {
+                  _agreeTerms = value ?? false;
+                  _agreePrivacy = value ?? false;
+                });
+              },
             ),
-            onChanged: (val) {
-              final next = val ?? false;
-              setState(() {
-                _agreeTerms = next;
-                _agreePrivacy = next;
-              });
-            },
-          ),
-          const Divider(height: 6),
-          CheckboxListTile(
-            value: _agreeTerms,
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: const Text(
-              '[필수] 서비스 이용약관 동의',
-              style: TextStyle(fontSize: 12),
+            const Divider(height: 6),
+            _buildAgreementRow(
+              value: _agreeTerms,
+              label: '[필수] 서비스 이용약관 동의',
+              onChanged: (value) {
+                setState(() {
+                  _agreeTerms = value ?? false;
+                });
+              },
             ),
-            onChanged: (val) => setState(() => _agreeTerms = val ?? false),
-          ),
-          CheckboxListTile(
-            value: _agreePrivacy,
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: const Text(
-              '[필수] 개인정보 처리방침 동의',
-              style: TextStyle(fontSize: 12),
+            _buildAgreementRow(
+              value: _agreePrivacy,
+              label: '[필수] 개인정보 처리방침 동의',
+              onChanged: (value) {
+                setState(() {
+                  _agreePrivacy = value ?? false;
+                });
+              },
             ),
-            onChanged: (val) => setState(() => _agreePrivacy = val ?? false),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAgreementRow({
+    required bool value,
+    required String label,
+    required ValueChanged<bool?> onChanged,
+    bool bold = false,
+  }) {
+    return MergeSemantics(
+      child: InkWell(
+        onTap: _busy ? null : () => onChanged(!value),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Checkbox(
+                value: value,
+                activeColor: _deepPurple,
+                onChanged: _busy ? null : onChanged,
+              ),
+              Expanded(
+                child: Text(
+                  label,
+                  softWrap: true,
+                  style: TextStyle(
+                    fontSize: bold ? 13 : 12,
+                    fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

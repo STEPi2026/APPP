@@ -1,22 +1,55 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'api.dart';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ExperienceProgress {
+  static const maxLevel = 500;
   final int totalXp;
+  final int level;
+  final int remainingXp;
+  final bool isAvailable;
+  const ExperienceProgress(
+    this.totalXp, {
+    this.level = 1,
+    this.remainingXp = 50,
+    this.isAvailable = false,
+  });
 
-  const ExperienceProgress(this.totalXp);
+  factory ExperienceProgress.fromJson(Map<String, dynamic> json) {
+    final xp = json['xp'];
+    final level = json['level'];
+    final remaining = json['xp_to_next_level'];
+    if (xp is! int ||
+        xp < 0 ||
+        level is! int ||
+        level < 1 ||
+        level > maxLevel ||
+        remaining is! int ||
+        remaining < 0 ||
+        (level == maxLevel
+            ? remaining != 0
+            : remaining > 50 + 10 * ((level - 1) ~/ 25))) {
+      throw const FormatException('Invalid server gamification state');
+    }
+    return ExperienceProgress(
+      xp,
+      level: level,
+      remainingXp: remaining,
+      isAvailable: true,
+    );
+  }
 
-  static const xpPerLevel = 100;
-
-  int get level => totalXp ~/ xpPerLevel + 1;
-
-  int get currentLevelXp => totalXp % xpPerLevel;
-
-  int get remainingXp => xpPerLevel - currentLevelXp;
-
-  double get progress => currentLevelXp / xpPerLevel;
+  bool get isMaxLevel => level == maxLevel;
+  int get xpPerLevel => 50 + 10 * ((level - 1) ~/ 25);
+  int get currentLevelXp => isMaxLevel ? xpPerLevel : xpPerLevel - remainingXp;
+  double get progress => !isAvailable
+      ? 0
+      : isMaxLevel
+      ? 1
+      : currentLevelXp / xpPerLevel;
 }
 
 class LearningStorage {
@@ -279,35 +312,16 @@ class LearningStorage {
     });
   }
 
-  static Future<ExperienceProgress> getExperienceProgress() {
-    return _run(() async {
-      final records = await _readSessions();
-      final skills = await _readSkills();
-
-      var totalXp = 0;
-
-      for (final record in records) {
-        totalXp += _readXp(record['earnedXp']);
-
-        final answers = record['answers'];
-        if (answers is! List) continue;
-
-        for (final answer in answers) {
-          if (answer is Map &&
-              answer['isCorrect'] == false &&
-              answer['reviewCompleted'] == true) {
-            totalXp += _readXp(answer['reviewEarnedXp']);
-          }
-        }
-      }
-
-      for (final skill in skills.values) {
-        if (skill is Map) {
-          totalXp += _readXp(skill['earnedXp']);
-        }
-      }
-
-      return ExperienceProgress(totalXp);
-    });
+  static Future<ExperienceProgress> getExperienceProgress({
+    Future<dynamic> Function(String path)? fetch,
+  }) async {
+    // Achievements includes xp_to_next_level; gamification only provides XP/level.
+    final response = await (fetch ?? ((path) => Api.get(path)))(
+      Api.achievementsEndpoint,
+    );
+    if (response is! Map) {
+      throw const FormatException('Invalid gamification response');
+    }
+    return ExperienceProgress.fromJson(Map<String, dynamic>.from(response));
   }
 }

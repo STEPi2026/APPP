@@ -1,27 +1,31 @@
 import 'package:flutter/material.dart';
 
+import 'widgets/stepi_logo.dart';
+
 import 'screens/home_tab.dart';
 import 'screens/learning_tab.dart';
 import 'screens/login_screen.dart';
-import 'screens/problem_screen.dart';
+import 'screens/capture_learning_screen.dart';
 import 'screens/shop_tab.dart';
 import 'screens/skill_tree_tab.dart';
 
 import 'services/learning_storage.dart';
-import 'services/question_service.dart';
-import 'services/reward_storage.dart';
+import 'screens/xp_history_screen.dart';
+
+import 'services/api.dart';
 
 final RouteObserver<PageRoute<dynamic>> appRouteObserver =
     RouteObserver<PageRoute<dynamic>>();
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  runApp(const StepIApp());
+  final bool isLoggedIn = await Api.initTokens();
+  runApp(StepIApp(isLoggedIn: isLoggedIn));
 }
 
 class StepIApp extends StatelessWidget {
-  const StepIApp({super.key});
+  final bool isLoggedIn;
+  const StepIApp({super.key, required this.isLoggedIn});
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +45,7 @@ class StepIApp extends StatelessWidget {
           surfaceTintColor: Colors.transparent,
         ),
       ),
-      home: const LoginScreen(),
+      home: isLoggedIn ? const MainScreen() : const LoginScreen(),
     );
   }
 }
@@ -67,20 +71,22 @@ class _MainScreenState extends State<MainScreen>
 
   bool _loadingExperience = true;
   bool _refreshingExperience = false;
-  bool _refreshingGold = false;
 
   String? _experienceError;
-  String? _goldError;
 
   PageRoute<dynamic>? _subscribedRoute;
 
   late final List<Widget> _pages;
+  late final VoidCallback _sessionExpired;
+  bool _leavingSession = false, _loggingOut = false;
 
   @override
   void initState() {
     super.initState();
 
     WidgetsBinding.instance.addObserver(this);
+    _sessionExpired = _goToLogin;
+    Api.onSessionExpired = _sessionExpired;
 
     _pages = [
       HomeTab(key: _homeKey, onNavigate: _onItemTapped),
@@ -128,10 +134,27 @@ class _MainScreenState extends State<MainScreen>
 
   @override
   void dispose() {
+    if (Api.onSessionExpired == _sessionExpired) Api.onSessionExpired = null;
     appRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
 
     super.dispose();
+  }
+
+  void _goToLogin() {
+    if (!mounted || _leavingSession) return;
+    _leavingSession = true;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+      (_) => false,
+    );
+  }
+
+  Future<void> _logout() async {
+    if (_leavingSession || _loggingOut) return;
+    _loggingOut = true;
+    await Api.logout();
+    _goToLogin();
   }
 
   void _onItemTapped(int index) {
@@ -148,11 +171,7 @@ class _MainScreenState extends State<MainScreen>
   Future<void> _openDirectCameraCapture() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (context) => const ProblemScreen(
-          topic: '외부 문제집 촬영',
-          questionService: MockQuestionService(unit: '다항식'),
-          startWithCamera: true,
-        ),
+        builder: (context) => const CaptureLearningScreen(),
       ),
     );
 
@@ -162,7 +181,7 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Future<void> _refreshBalances() async {
-    await Future.wait<void>([_refreshExperience(), _refreshGold()]);
+    await _refreshExperience();
   }
 
   Future<void> _refreshExperience() async {
@@ -186,38 +205,12 @@ class _MainScreenState extends State<MainScreen>
 
       setState(() {
         _loadingExperience = false;
-        _experienceError = '저장된 경험치를 불러오지 못했습니다.';
+        _experienceError = '서버 경험치를 불러오지 못했습니다.';
       });
 
       _showStorageError(_experienceError!);
     } finally {
       _refreshingExperience = false;
-    }
-  }
-
-  Future<void> _refreshGold() async {
-    if (!mounted || _refreshingGold) return;
-
-    _refreshingGold = true;
-
-    try {
-      await RewardStorage.getGold();
-
-      if (!mounted) return;
-
-      setState(() {
-        _goldError = null;
-      });
-    } catch (_) {
-      if (!mounted) return;
-
-      setState(() {
-        _goldError = '저장된 골드를 불러오지 못했습니다.';
-      });
-
-      _showStorageError(_goldError!);
-    } finally {
-      _refreshingGold = false;
     }
   }
 
@@ -252,24 +245,15 @@ class _MainScreenState extends State<MainScreen>
       child: Scaffold(
         extendBody: true,
         appBar: AppBar(
-          title: const Text(
-            'STEPi',
-            style: TextStyle(fontWeight: FontWeight.w800, color: _primaryColor),
-          ),
+          title: const StepILogo(width: 96),
           actions: [
             _buildLevelBadge(),
             const SizedBox(width: 8),
-            _buildGoldBadge(),
+            _buildXpBadge(),
             const SizedBox(width: 4),
             IconButton(
               tooltip: '학부모·교사 리포트 및 로그인 전환',
-              onPressed: () {
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute<void>(
-                    builder: (context) => const LoginScreen(),
-                  ),
-                );
-              },
+              onPressed: _logout,
               icon: const Icon(
                 Icons.switch_account_rounded,
                 size: 22,
@@ -420,7 +404,7 @@ class _MainScreenState extends State<MainScreen>
       label = 'Lv. ${_experience.level}';
       tooltip =
           '누적 ${_experience.totalXp} XP\n'
-          '다음 레벨까지 ${_experience.remainingXp} XP';
+          '${_experience.isMaxLevel ? '최고 레벨 500 달성' : '다음 레벨까지 ${_experience.remainingXp} XP'}';
     }
 
     return Center(
@@ -444,87 +428,78 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
-  Widget _buildGoldBadge() {
-    return ValueListenableBuilder<int?>(
-      valueListenable: RewardStorage.goldNotifier,
-      builder: (context, gold, child) {
-        final label = _goldError != null
-            ? '— G'
-            : gold == null
-            ? '… G'
-            : '$gold G';
-
-        return Center(
-          child: Tooltip(
-            message: _goldError ?? '오늘의 퀘스트에서 골드를 받을 수 있어요.',
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF7E6),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.monetization_on_rounded,
-                    size: 18,
-                    color: Color(0xFFE5A000),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    label,
-                    style: const TextStyle(
-                      color: Color(0xFF9B7000),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+  Widget _buildXpBadge() => Center(
+    child: Tooltip(
+      message: 'XP 지급 이력 확인',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute<void>(builder: (_) => const XpHistoryScreen()),
+        ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF7E6),
+            borderRadius: BorderRadius.circular(12),
           ),
-        );
-      },
-    );
-  }
-
-  Widget _buildExperienceBar() {
-    final unavailable = _loadingExperience || _experienceError != null;
-
-    String label;
-
-    if (_loadingExperience) {
-      label = '경험치 불러오는 중…';
-    } else if (_experienceError != null) {
-      label = '경험치 로드 실패';
-    } else {
-      label =
-          '${_experience.currentLevelXp}'
-          ' / ${ExperienceProgress.xpPerLevel} XP';
-    }
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-      child: Row(
-        children: [
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: unavailable ? 0.0 : _experience.progress,
-                minHeight: 6,
-                backgroundColor: const Color(0xFFF0EBFF),
-                color: _primaryColor,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.auto_awesome_rounded,
+                size: 18,
+                color: Color(0xFFE5A000),
               ),
-            ),
+              const SizedBox(width: 4),
+              Text(
+                _experienceError != null
+                    ? '— XP'
+                    : _loadingExperience
+                    ? '… XP'
+                    : '${_experience.totalXp} XP',
+                style: const TextStyle(
+                  color: Color(0xFF9B7000),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          Text(
-            label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF777777)),
-          ),
-        ],
+        ),
       ),
-    );
-  }
+    ),
+  );
+  Widget _buildExperienceBar() => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+    child: Row(
+      children: [
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: _loadingExperience
+                  ? null
+                  : _experienceError != null
+                  ? 0
+                  : _experience.progress,
+              minHeight: 6,
+              color: _primaryColor,
+              backgroundColor: const Color(0xFFF0ECF8),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          _experienceError != null
+              ? 'XP 확인 필요'
+              : _loadingExperience
+              ? '불러오는 중'
+              : _experience.isMaxLevel
+              ? '최고 레벨'
+              : '다음 레벨까지 ${_experience.remainingXp} XP',
+          style: const TextStyle(fontSize: 10, color: Color(0xFF888888)),
+        ),
+      ],
+    ),
+  );
 }

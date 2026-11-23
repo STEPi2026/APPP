@@ -1,19 +1,23 @@
 import 'package:flutter/material.dart';
 
-import '../services/learning_storage.dart';
+import '../services/learning_repository.dart';
+import '../services/student_learning_records.dart';
 import 'learning_history_detail_screen.dart';
-import 'problem_screen.dart';
+import 'recorded_problem_route.dart';
 
 enum _HistoryView { history, unreviewed, reviewed }
 
 class LearningHistoryScreen extends StatefulWidget {
-  const LearningHistoryScreen({super.key});
+  final LearningRepository? repository;
+  final DateTime? studyDate;
+  const LearningHistoryScreen({super.key, this.repository, this.studyDate});
 
   @override
   State<LearningHistoryScreen> createState() => _LearningHistoryScreenState();
 }
 
 class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
+  late final _repo = widget.repository ?? LearningRepository();
   late Future<List<Map<String, dynamic>>> _records;
 
   _HistoryView _view = _HistoryView.history;
@@ -26,14 +30,16 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
   @override
   void initState() {
     super.initState();
-    _records = LearningStorage.loadSessions();
+    _records = StudentLearningRecords(_repo)
+        .history(studyDate: widget.studyDate);
   }
 
   void _reload() {
     if (!mounted) return;
 
     setState(() {
-      _records = LearningStorage.loadSessions();
+      _records = StudentLearningRecords(_repo)
+          .history(studyDate: widget.studyDate);
     });
   }
 
@@ -56,17 +62,20 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
         .toList();
   }
 
-  int _unreviewedCount(Map<String, dynamic> record) {
-    return _getAnswers(record).where((answer) {
-      return answer['isCorrect'] == false && answer['reviewCompleted'] != true;
-    }).length;
-  }
-
-  int _reviewedCount(Map<String, dynamic> record) {
-    return _getAnswers(record).where((answer) {
-      return answer['isCorrect'] == false && answer['reviewCompleted'] == true;
-    }).length;
-  }
+  int _unreviewedCount(Map<String, dynamic> record) =>
+      _reviewCount(record, false);
+  int _reviewedCount(Map<String, dynamic> record) => _reviewCount(record, true);
+  int _reviewCount(Map<String, dynamic> record, bool resolved) =>
+      _getAnswers(record)
+          .where(
+            (answer) =>
+                answer['isCorrect'] == false &&
+                answer['reviewCompleted'] == resolved &&
+                answer['problemId'] is int,
+          )
+          .map((answer) => answer['problemId'] as int)
+          .toSet()
+          .length;
 
   int _toInt(dynamic value) {
     if (value is num) return value.toInt();
@@ -79,7 +88,7 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
 
     if (date == null) return '날짜 정보 없음';
 
-    final local = date.toLocal();
+    final local = date.toUtc().add(const Duration(hours: 9));
     final month = local.month.toString().padLeft(2, '0');
     final day = local.day.toString().padLeft(2, '0');
     final hour = local.hour.toString().padLeft(2, '0');
@@ -99,84 +108,27 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
   Future<void> _openDetail(Map<String, dynamic> record) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (context) => LearningHistoryDetailScreen(record: record),
+        builder: (context) =>
+            LearningHistoryDetailScreen(record: record, repository: _repo),
       ),
     );
 
     _reload();
   }
 
-  /// 객관식과 주관식(SHORT_ANSWER) 모두 다시 풀기가 가능하도록 PracticeQuestion.fromJson으로 통일
-  Future<void> _retryQuestion(
-    Map<String, dynamic> record,
-    Map<String, dynamic> answer,
-    int fallbackQuestionNumber,
-  ) async {
+  Future<void> _retryQuestion(Map<String, dynamic> answer) async {
     if (_openingReview) return;
-
-    final completedAt = record['completedAt']?.toString();
-    final questionNumber = int.tryParse(
-      '${answer['questionNumber'] ?? fallbackQuestionNumber}',
-    );
-
-    if (completedAt == null || completedAt.isEmpty || questionNumber == null) {
-      _showMessage(
-        '이 기록에는 다시 풀기에 필요한 정보가 없어요. '
-        '새로 학습한 문제부터 이용할 수 있어요.',
-      );
+    final id = answer['problemId'];
+    if (id is! int) {
+      _showMessage('이 기록에서 원래 문제를 열 수 없어요.');
       return;
     }
-
-    late final PracticeQuestion question;
-
+    setState(() => _openingReview = true);
     try {
-      final rawCorrectIndex = answer['correctIndex'];
-
-      question = PracticeQuestion.fromJson({
-        ...answer,
-        'title': answer['title']?.toString() ?? '오답 복습',
-        'question': answer['question']?.toString() ?? '',
-        'explanation': answer['explanation']?.toString() ?? '해설이 없어요.',
-        'correctIndex': rawCorrectIndex is int
-            ? rawCorrectIndex
-            : int.tryParse(rawCorrectIndex?.toString() ?? '') ?? -1,
-      });
-    } catch (_) {
-      _showMessage(
-        '이 기록에는 다시 풀기에 필요한 정보가 없어요. '
-        '새로 학습한 문제부터 이용할 수 있어요.',
-      );
-      return;
-    }
-
-    setState(() {
-      _openingReview = true;
-    });
-
-    try {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (context) => ProblemScreen(
-            topic: _topicOf(record),
-            reviewQuestion: question,
-            onReviewCompleted: () {
-              return LearningStorage.markReviewCompleted(
-                completedAt: completedAt,
-                questionNumber: questionNumber,
-              );
-            },
-          ),
-        ),
-      );
-    } catch (_) {
-      _showMessage('복습 화면을 열거나 저장하지 못했어요. 다시 시도해 주세요.');
+      await openRecordedProblem(context, id, _repo);
+      _reload();
     } finally {
-      if (mounted) {
-        setState(() {
-          _openingReview = false;
-          _records = LearningStorage.loadSessions();
-        });
-      }
+      if (mounted) setState(() => _openingReview = false);
     }
   }
 
@@ -271,7 +223,14 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
     final total = _toInt(record['totalCount']);
     final correct = _toInt(record['correctCount']);
 
-    final rate = total > 0 ? (correct / total * 100).round() : 0;
+    final pending = _getAnswers(record)
+        .where((a) => a['isCorrect'] == null && a['isPartialSolution'] != true)
+        .length;
+    final partial = _getAnswers(record)
+        .where((a) => a['isCorrect'] == null && a['isPartialSolution'] == true)
+        .length;
+    final reviewUnknown = _getAnswers(record)
+        .any((a) => a['isCorrect'] == false && a['reviewCompleted'] == null);
 
     final unreviewed = _unreviewedCount(record);
     final reviewed = _reviewedCount(record);
@@ -311,8 +270,7 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                '풀이 결과: $total문제 중 $correct문제 해결'
-                ' · 성취율 $rate%',
+                '제출 $total회 · 정답 $correct회${partial > 0 ? ' · 부분 풀이 $partial회' : ''}${pending > 0 ? ' · 미판정 $pending회' : ''}',
                 style: const TextStyle(
                   color: Color(0xFF7652FF),
                   fontWeight: FontWeight.w600,
@@ -320,8 +278,12 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
               ),
               const SizedBox(height: 14),
               if (unreviewed + reviewed == 0)
-                const Text(
-                  '복습할 오답 없음',
+                Text(
+                  partial > 0
+                      ? '풀이를 마무리해 주세요'
+                      : reviewUnknown
+                      ? '복습 상태 확인 불가'
+                      : '복습할 오답 없음',
                   style: TextStyle(
                     color: Color(0xFF278B4B),
                     fontWeight: FontWeight.bold,
@@ -348,7 +310,7 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
                     ),
                   ],
                 ),
-                if (unreviewed == 0) ...[
+                if (unreviewed == 0 && !reviewUnknown) ...[
                   const SizedBox(height: 8),
                   const Text(
                     '모든 오답 복습 완료!',
@@ -361,7 +323,7 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
               ],
               const SizedBox(height: 12),
               const Text(
-                '눌러서 단계별 오류 분석 기록과 해설 보기',
+                '눌러서 제출 답안과 결과 보기',
                 style: TextStyle(fontSize: 13, color: Color(0xFF777777)),
               ),
             ],
@@ -480,15 +442,13 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: _openingReview
-                  ? null
-                  : () => _retryQuestion(record, answer, originalIndex + 1),
+              onPressed: _openingReview ? null : () => _retryQuestion(answer),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF7652FF),
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-              child: Text(completed ? '변형 문제로 한 번 더 풀기' : 'AI 튜터와 오답 다시 풀기'),
+              child: Text(completed ? '한 번 더 풀기' : '오답 다시 풀기'),
             ),
           ),
           Align(
@@ -590,11 +550,12 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
     }
 
     final entries = <Map<String, dynamic>>[];
+    final seen = <int>{};
 
     for (final record in records) {
       final answers = _getAnswers(record);
 
-      for (var index = 0; index < answers.length; index++) {
+      for (var index = answers.length - 1; index >= 0; index--) {
         final answer = answers[index];
 
         if (answer['isCorrect'] != false) continue;
@@ -602,10 +563,12 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
         final completed = answer['reviewCompleted'] == true;
 
         final shouldShow = _view == _HistoryView.unreviewed
-            ? !completed
+            ? answer['reviewCompleted'] == false
             : completed;
 
         if (!shouldShow) continue;
+        final id = answer['problemId'];
+        if (id is! int || !seen.add(id)) continue;
 
         entries.add({
           'record': record,
@@ -652,7 +615,11 @@ class _LearningHistoryScreenState extends State<LearningHistoryScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('학습 기록 · 오답노트'),
+        title: Text(
+          widget.studyDate == null
+              ? '학습 기록 · 오답노트'
+              : '${widget.studyDate!.year}.${widget.studyDate!.month}.${widget.studyDate!.day} 학습 기록',
+        ),
         backgroundColor: Colors.white,
         foregroundColor: const Color(0xFF171717),
       ),

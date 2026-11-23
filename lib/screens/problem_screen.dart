@@ -8,9 +8,26 @@
 // -> 7. 완료 축하 모달 카드(XP 내역 + 레벨 바 + 신규 배지 + [비슷한 변형 문제] / [다른 문제])
 import 'dart:async';
 
+import '../services/api.dart';
+import '../services/learning_repository.dart';
+import 'problem_result_dialog.dart';
+import '../models/learning_next_action.dart';
+import '../models/math_display.dart';
+import 'learning_action_routes.dart';
+import 'learning_support_screen.dart';
+import 'capture_learning_screen.dart';
+import '../services/capture_service.dart';
+import '../services/tutor_session_service.dart';
+import 'tutor_session_screen.dart';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+
+import '../services/numeric_answer_formatter.dart';
+import '../services/related_question_service.dart';
 
 import '../models/practice_question.dart';
+import '../models/scratchpad_strokes.dart';
 import '../services/learning_storage.dart';
 import '../services/question_service.dart';
 
@@ -71,18 +88,22 @@ class ProblemScreen extends StatefulWidget {
   final Future<void> Function()? onReviewCompleted;
   final QuestionService questionService;
   final String topic;
+  final LearningRepository? repository;
 
   /// false(기본값): 앱이 문제를 먼저 제공하고 [카메라 촬영] / [그냥 정답 입력] 환경을 보여줌
   /// true: 하단 중앙 카메라 FAB 등에서 외부 문제집을 즉시 촬영할 때 카메라부터 시작
   final bool startWithCamera;
+  final bool openAnswerOnStart;
 
   const ProblemScreen({
     super.key,
     this.reviewQuestion,
     this.onReviewCompleted,
-    this.questionService = const MockQuestionService(),
+    this.questionService = const ServerQuestionService(),
+    this.repository,
     this.topic = '다항식',
     this.startWithCamera = false,
+    this.openAnswerOnStart = false,
   });
 
   @override
@@ -92,7 +113,6 @@ class ProblemScreen extends StatefulWidget {
 class _ProblemScreenState extends State<ProblemScreen> {
   static const _purple = Color(0xFF7C5CFA);
   static const _lightPurple = Color(0xFFF3EEFF);
-  static const _guideOrangeRed = Color(0xFFFF5238);
   static const _errorPink = Color(0xFFFF6B6B);
   static const _textColor = Color(0xFF171717);
   static const _mutedColor = Color(0xFF777777);
@@ -100,6 +120,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
   bool get _isReview => widget.reviewQuestion != null;
   final Set<String> _savedAttemptKeys = {};
   bool _reviewCompletedSaved = false;
+  bool _openedInitialAnswer = false;
 
   List<PracticeQuestion> _questions = [];
   bool _loading = true;
@@ -109,7 +130,6 @@ class _ProblemScreenState extends State<ProblemScreen> {
   late _FigmaFlowStage _stage;
 
   // 촬영 시나리오 (완벽한 풀이 바로 완료 모달 시연 vs 오개념 AI 개입 시연)
-  bool _simulatePerfectFirstTry = false;
   bool _ocrUncertainConfirmed = false;
 
   // 분석 결과 화면 상태
@@ -125,9 +145,23 @@ class _ProblemScreenState extends State<ProblemScreen> {
 
   // 문제 풀이 환경 & 다시 풀기 (모눈종이 연습장 + 정답 직접 입력) 상태
   final List<List<Offset>> _scribbleStrokes = [];
+  bool _strokeEraser = false;
+  List<Offset>? _activeScribbleStroke;
+  Offset? _lastEraserPosition;
   bool _isVariantMode = false;
   final TextEditingController _directAnswerController = TextEditingController();
   int? _selectedChoiceIndex;
+  late final _repository = widget.repository ?? LearningRepository();
+  late final _tutor = TutorSessionService(repository: _repository);
+  TutorTarget get _tutorTarget =>
+      TutorTarget.recommended(_question.problemId!, sessionId: _serverSession);
+  int? _serverSession;
+  JsonMap? _serverAttempt;
+  final _solveClock = Stopwatch();
+  bool _submitting = false, _finishing = false, _allowExit = false;
+  bool _tutorStarted = false;
+  bool? _resolvedTutorReady;
+  bool get _serverMode => _questions.isNotEmpty && _question.isServerProblem;
 
   PracticeQuestion get _question => _questions[_questionIndex];
 
@@ -153,6 +187,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
     _analysisScrollController.dispose();
     _chatInputController.dispose();
     _directAnswerController.dispose();
+    _solveClock.stop();
     super.dispose();
   }
 
@@ -175,11 +210,11 @@ class _ProblemScreenState extends State<ProblemScreen> {
       if (_questions.isNotEmpty) {
         _initQuestionFlow(keepCameraStart: widget.startWithCamera);
       }
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _loadError = '문제를 불러오지 못했어요.';
+        _loadError = learningError(e);
       });
     }
   }
@@ -189,6 +224,12 @@ class _ProblemScreenState extends State<ProblemScreen> {
     bool keepCameraStart = false,
   }) {
     setState(() {
+      _serverAttempt = null;
+      _tutorStarted = false;
+      _resolvedTutorReady = null;
+      _solveClock
+        ..reset()
+        ..start();
       _stage = keepCameraStart
           ? _FigmaFlowStage.cameraCapture
           : (asVariant
@@ -200,6 +241,9 @@ class _ProblemScreenState extends State<ProblemScreen> {
       _ocrUncertainConfirmed = false;
       _showOriginalSolutionInChat = false;
       _scribbleStrokes.clear();
+      _strokeEraser = false;
+      _activeScribbleStroke = null;
+      _lastEraserPosition = null;
       _directAnswerController.clear();
       _selectedChoiceIndex = null;
       _chatMessages
@@ -214,6 +258,62 @@ class _ProblemScreenState extends State<ProblemScreen> {
           ),
         ]);
     });
+    if (widget.openAnswerOnStart &&
+        !_openedInitialAnswer &&
+        _questions.isNotEmpty) {
+      _openedInitialAnswer = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _openAnswerInputDialog(
+            autoSubmitAfterConfirm: false,
+            isRetryStage: false,
+          );
+        }
+      });
+    }
+  }
+
+  void _selectScratchpadTool(bool erase) {
+    setState(() {
+      _strokeEraser = erase;
+      _activeScribbleStroke = null;
+      _lastEraserPosition = null;
+    });
+  }
+
+  void _eraseScratchpadAt(Offset point) {
+    final from = _lastEraserPosition ?? point;
+    _scribbleStrokes.removeWhere(
+      (stroke) => scratchpadStrokeHit(stroke, from, point),
+    );
+    _lastEraserPosition = point;
+  }
+
+  void _startScratchpadStroke(Offset point) {
+    setState(() {
+      if (_strokeEraser) {
+        _lastEraserPosition = null;
+        _eraseScratchpadAt(point);
+      } else {
+        _activeScribbleStroke = [point];
+        _scribbleStrokes.add(_activeScribbleStroke!);
+      }
+    });
+  }
+
+  void _updateScratchpadStroke(Offset point) {
+    setState(() {
+      if (_strokeEraser) {
+        _eraseScratchpadAt(point);
+      } else {
+        _activeScribbleStroke?.add(point);
+      }
+    });
+  }
+
+  void _endScratchpadStroke() {
+    _activeScribbleStroke = null;
+    _lastEraserPosition = null;
   }
 
   List<_HighlightPinData> _pinsForCurrentQuestion() {
@@ -263,30 +363,6 @@ class _ProblemScreenState extends State<ProblemScreen> {
   }
 
   /// 이미지 확인에서 [다음 ->] 클릭 시 UFO 로딩 화면을 거쳐 결과 화면 또는 완료 모달로 이동
-  Future<void> _startUfoAnalysis() async {
-    setState(() {
-      _stage = _FigmaFlowStage.ufoLoading;
-    });
-
-    await Future<void>.delayed(const Duration(milliseconds: 1500));
-    if (!mounted) return;
-
-    if (_simulatePerfectFirstTry) {
-      setState(() {
-        _stage = _FigmaFlowStage.imageConfirm;
-      });
-      await _recordCurrentAttempt(isCorrect: true);
-      if (!mounted) return;
-      _showCompletionRewardModal(isRetrySuccess: false);
-    } else {
-      await _recordCurrentAttempt(isCorrect: false);
-      if (!mounted) return;
-      setState(() {
-        _stage = _FigmaFlowStage.analysisResult;
-      });
-    }
-  }
-
   /// AI 튜터 채팅 전송 (정답 직접 노출 차단 GS-LEAK 포함)
   void _sendChatMessage(String raw) {
     final text = raw.trim();
@@ -344,6 +420,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
   /// 문제를 풀 때마다 즉시 SharedPreferences(LearningStorage)에 영구 저장합니다.
   /// (1문제만 풀고 뒤로가기를 누르거나 앱을 완전히 종료해도 연속학습·경험치·퀘스트·오답노트에 즉시 반영됨)
   Future<void> _recordCurrentAttempt({required bool isCorrect}) async {
+    if (_serverMode) return;
     if (_isReview) {
       if (isCorrect && !_reviewCompletedSaved) {
         _reviewCompletedSaved = true;
@@ -388,6 +465,11 @@ class _ProblemScreenState extends State<ProblemScreen> {
 
   /// 그냥 정답 입력 후 [제출하기] 클릭 시 처리
   Future<void> _handleDirectSubmit({required bool isRetryStage}) async {
+    if (_submitting || _finishing) return;
+    if (_serverMode && _serverAttempt != null) {
+      await _presentServerResult();
+      return;
+    }
     final typedAnswer = _directAnswerController.text.trim();
     final hasInput = typedAnswer.isNotEmpty || _selectedChoiceIndex != null;
 
@@ -397,6 +479,10 @@ class _ProblemScreenState extends State<ProblemScreen> {
         autoSubmitAfterConfirm: true,
         isRetryStage: isRetryStage,
       );
+      return;
+    }
+    if (_serverMode) {
+      await _submitServerAnswer();
       return;
     }
 
@@ -482,10 +568,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
             FilledButton.icon(
               onPressed: () {
                 Navigator.of(dialogContext).pop();
-                setState(() {
-                  _simulatePerfectFirstTry = false;
-                  _stage = _FigmaFlowStage.cameraCapture;
-                });
+                _openPhotoCapture();
               },
               style: FilledButton.styleFrom(backgroundColor: _purple),
               icon: const Icon(Icons.camera_alt_rounded, size: 18),
@@ -501,6 +584,10 @@ class _ProblemScreenState extends State<ProblemScreen> {
   Future<void> _showCompletionRewardModal({
     required bool isRetrySuccess,
   }) async {
+    if (_serverMode) {
+      if (_serverAttempt != null) await _presentServerResult();
+      return;
+    }
     await _recordCurrentAttempt(isCorrect: true);
 
     ExperienceProgress exp;
@@ -616,7 +703,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text(
-                            '총 획득 경험치',
+                            '연습용 XP (서버 지급 아님)',
                             style: TextStyle(
                               fontSize: 15,
                               fontWeight: FontWeight.w800,
@@ -638,12 +725,18 @@ class _ProblemScreenState extends State<ProblemScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // 실시간 레벨 게이지 바 (100 XP당 1레벨업 · LearningStorage 실제 데이터 연동)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                // 서버 레벨과 다음 레벨까지 남은 XP로 표시합니다.
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  spacing: 12,
+                  runSpacing: 8,
                   children: [
                     Text(
-                      'Lv.${exp.level} 수학 탐험가',
+                      exp.isAvailable
+                          ? (exp.isMaxLevel
+                                ? 'Lv.500 · 최고 레벨'
+                                : 'Lv.${exp.level} 수학 탐험가')
+                          : '레벨 확인 불가',
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -651,7 +744,11 @@ class _ProblemScreenState extends State<ProblemScreen> {
                       ),
                     ),
                     Text(
-                      '${exp.currentLevelXp} / ${ExperienceProgress.xpPerLevel} XP (누적 ${exp.totalXp} XP)',
+                      exp.isAvailable
+                          ? (exp.isMaxLevel
+                                ? '누적 ${exp.totalXp} XP'
+                                : '${exp.currentLevelXp} / ${exp.xpPerLevel} XP')
+                          : '서버 경험치를 불러오지 못했어요',
                       style: const TextStyle(fontSize: 12, color: _mutedColor),
                     ),
                   ],
@@ -695,7 +792,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
                           children: [
                             Text(
                               isRetrySuccess
-                                  ? '신규 배지: 포기하지 않는 도전자'
+                                  ? '실제 획득 배지는 도감에서 확인하세요'
                                   : '오늘 학습 기록 저장 완료!',
                               style: const TextStyle(
                                 fontSize: 13,
@@ -825,7 +922,335 @@ class _ProblemScreenState extends State<ProblemScreen> {
     }
 
     if (!mounted) return;
-    Navigator.of(context).pop();
+    if (_serverMode) {
+      await _closeServerLearning();
+    } else {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _openPhotoCapture() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CaptureLearningScreen(
+          problem: _serverMode ? _question : null,
+          sessionId: _serverSession,
+          service: CaptureService(repository: _repository),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submitServerAnswer() async {
+    if (_submitting || _finishing || _serverAttempt != null) return;
+    final selected = _selectedChoiceIndex;
+    final answer = selected != null
+        ? _question.choiceAnswer(selected)
+        : _directAnswerController.text.trim();
+    if (answer.isEmpty) return;
+    if (_question.input.missingChoices ||
+        (_question.input.isNumeric && !_question.input.accepts(answer))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _question.input.missingChoices
+                ? '이 문제의 보기를 준비 중이에요.'
+                : '숫자 또는 기약분수로 입력해 주세요. 예: -2, 0.5, 3/2',
+          ),
+        ),
+      );
+      return;
+    }
+    if (answer.length > 200) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('답안은 200자 이내로 입력해 주세요.')));
+      return;
+    }
+    setState(() => _submitting = true);
+    try {
+      final useTutor = await _resolveTutorRoute();
+      _serverSession ??= await _repository.startSession();
+      final JsonMap result;
+      if (useTutor) {
+        _tutorStarted = true;
+        result = (await _tutor.request(
+          _tutorTarget,
+          'CHECK_ANSWER',
+          answer: answer,
+        )).data;
+      } else {
+        result = await _repository.submit(
+          sessionId: _serverSession!,
+          problemId: _question.problemId!,
+          answer: answer,
+          seconds: _solveClock.elapsed.inSeconds,
+        );
+      }
+      if (!mounted) return;
+      // Retain the accepted response before fetching balances or displaying UI.
+      // Reopening results must never submit another rewarded attempt.
+      setState(() => _serverAttempt = result);
+      _solveClock.stop();
+      LearningRepository.notifyProgressChanged();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(learningError(e))));
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+    if (mounted && _serverAttempt != null) await _presentServerResult();
+  }
+
+  bool _showingResult = false;
+  Future<bool> _resolveTutorRoute() async {
+    if (_tutorStarted) return true;
+    final known = _resolvedTutorReady ?? _question.tutorReady;
+    if (known != null) return known;
+    final latest = await _repository.get(
+      '/api/v1/problems/${_question.problemId}',
+    );
+    if (latest['id'] != _question.problemId || latest['tutor_ready'] is! bool) {
+      throw const FormatException('문제의 채점 경로 정보를 갱신해야 해요. 잠시 후 다시 시도해 주세요.');
+    }
+    return _resolvedTutorReady = latest['tutor_ready'] as bool;
+  }
+
+  Future<void> _returnToAnswer() async {
+    if (!mounted) return;
+    setState(() {
+      _serverAttempt = null;
+      _stage = _FigmaFlowStage.problemSolveWorkspace;
+      _solveClock
+        ..reset()
+        ..start();
+    });
+    await _openAnswerInputDialog(
+      autoSubmitAfterConfirm: false,
+      isRetryStage: false,
+    );
+  }
+
+  Future<void> _openProblemHelp() async {
+    if (_serverMode && !_isVariantMode) {
+      await _openTutorFlow(action: 'HINT');
+      return;
+    }
+    final action = await Navigator.push<LearningNextAction>(
+      context,
+      MaterialPageRoute<LearningNextAction>(
+        builder: (_) => LearningSupportScreen(
+          problemTitle: _question.title,
+          problemId: _isVariantMode ? null : _question.problemId,
+          problemCode: _isVariantMode ? null : _question.problemCode,
+          repository: _repository,
+          returnForAnswer: true,
+        ),
+      ),
+    );
+    if (mounted && action == LearningNextAction.checkAnswer) {
+      await _returnToAnswer();
+    }
+  }
+
+  Future<void> _openTutorFlow({
+    String action = 'START',
+    JsonMap? initial,
+  }) async {
+    try {
+      if (!await _resolveTutorRoute()) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('이 문제는 AI 도움을 준비 중이에요. 답은 바로 제출할 수 있어요.'),
+            ),
+          );
+        }
+        return;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(learningError(error))));
+      }
+      return;
+    }
+    if (!mounted) return;
+    _tutorStarted = true;
+    final next = await Navigator.push<LearningNextAction>(
+      context,
+      MaterialPageRoute<LearningNextAction>(
+        builder: (_) => TutorSessionScreen(
+          target: _tutorTarget,
+          service: _tutor,
+          problemTitle: _question.title,
+          initialAction: action,
+          initialResult: initial == null ? null : TutorSessionResult(initial),
+          returnForAnswer: true,
+        ),
+      ),
+    );
+    if (mounted && next == LearningNextAction.checkAnswer) {
+      await _returnToAnswer();
+    }
+  }
+
+  Future<void> _presentServerResult() async {
+    if (_showingResult || _serverAttempt == null) return;
+    _showingResult = true;
+    try {
+      while (mounted && _serverAttempt != null) {
+        var progress = const ExperienceProgress(0);
+        try {
+          progress = ExperienceProgress.fromJson(
+            await _repository.get('/api/v1/me/achievements'),
+          );
+        } catch (_) {}
+        if (!mounted) return;
+        final action = await showDialog<ProblemResultAction>(
+          context: context,
+          barrierColor: const Color(0xB3000000),
+          barrierDismissible: false,
+          builder: (_) => ProblemResultDialog(
+            result: _serverAttempt!,
+            experience: progress,
+            isLast: _questionIndex == _questions.length - 1,
+            tutorAvailable:
+                _tutorStarted ||
+                (_resolvedTutorReady ?? _question.tutorReady) == true,
+          ),
+        );
+        if (!mounted) return;
+        if (action == ProblemResultAction.followNextAction) {
+          final next = LearningNextAction.fromResponse(_serverAttempt!);
+          if (_serverAttempt!['scenario'] == 'RECOMMENDED') {
+            if (next == LearningNextAction.checkAnswer &&
+                _serverAttempt!['next_problem'] == null) {
+              await _returnToAnswer();
+            } else if (next == LearningNextAction.nextSkill) {
+              final target = _serverAttempt!['next_skill'];
+              await openLearningAction(
+                context,
+                next!,
+                repository: _repository,
+                response: {
+                  ..._serverAttempt!,
+                  if (target is Map) 'next_skill_code': target['skill_code'],
+                },
+              );
+            } else {
+              await _openTutorFlow(
+                action: next == LearningNextAction.relearn
+                    ? 'RELEARN'
+                    : next == LearningNextAction.showSolution
+                    ? 'SHOW_SOLUTION'
+                    : 'START',
+                initial:
+                    [
+                      LearningNextAction.relearn,
+                      LearningNextAction.showSolution,
+                    ].contains(next)
+                    ? null
+                    : _serverAttempt,
+              );
+              if (next == LearningNextAction.complete && mounted) {
+                await _closeServerLearning();
+                return;
+              }
+            }
+            continue;
+          }
+          if (next != null) {
+            await openLearningAction(
+              context,
+              next,
+              repository: _repository,
+              response: _serverAttempt!,
+              problemId: _question.problemId,
+              onHint: _openProblemHelp,
+              onAnswer: _returnToAnswer,
+            );
+            if (next == LearningNextAction.complete && mounted) {
+              await _closeServerLearning();
+              return;
+            }
+          }
+          continue;
+        }
+        if (action == ProblemResultAction.help) {
+          await _openProblemHelp();
+          continue;
+        }
+        if (action == ProblemResultAction.related) {
+          if (_serverAttempt!['scenario'] == 'RECOMMENDED') {
+            await _openTutorFlow(action: 'RELEARN');
+            continue;
+          }
+          await Navigator.push(
+            context,
+            MaterialPageRoute<void>(
+              builder: (_) => ProblemScreen(
+                topic: '같은 개념 연습',
+                repository: _repository,
+                questionService: RelatedQuestionService(
+                  problemId: _question.problemId,
+                  repository: _repository,
+                ),
+              ),
+            ),
+          );
+          continue;
+        }
+        if (action == ProblemResultAction.retry) {
+          setState(() {
+            _serverAttempt = null;
+            _stage = _FigmaFlowStage.problemSolveWorkspace;
+            _solveClock
+              ..reset()
+              ..start();
+          });
+        } else if (action == ProblemResultAction.next) {
+          await _finishOrMoveNextQuestion();
+        }
+        break;
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _showingResult = false);
+      } else {
+        _showingResult = false;
+      }
+    }
+  }
+
+  Future<void> _closeServerLearning() async {
+    if (_submitting || _finishing) return;
+    setState(() => _finishing = true);
+    try {
+      if (_serverSession != null) {
+        await _repository.finishSession(_serverSession!);
+      }
+      if (!mounted) return;
+      LearningRepository.notifyProgressChanged();
+      setState(() {
+        _allowExit = true;
+        _finishing = false;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _finishing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '학습 종료를 저장하지 못했어요. 뒤로가기를 눌러 다시 시도해 주세요. ${learningError(e)}',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -846,6 +1271,11 @@ class _ProblemScreenState extends State<ProblemScreen> {
             children: [
               Text(_loadError ?? '준비된 문제가 없습니다.'),
               const SizedBox(height: 12),
+              if (!_isReview)
+                OutlinedButton(
+                  onPressed: _loadQuestions,
+                  child: const Text('다시 불러오기'),
+                ),
               ElevatedButton(
                 onPressed: () => Navigator.of(context).pop(),
                 child: const Text('돌아가기'),
@@ -856,6 +1286,31 @@ class _ProblemScreenState extends State<ProblemScreen> {
       );
     }
 
+    return PopScope(
+      canPop:
+          !_submitting && !_finishing && (_serverSession == null || _allowExit),
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && !_submitting && !_finishing) _closeServerLearning();
+      },
+      child: Stack(
+        children: [
+          AbsorbPointer(
+            absorbing: _submitting || _finishing || _showingResult,
+            child: _buildStage(),
+          ),
+          if (_submitting || _finishing)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(child: LinearProgressIndicator(color: _purple)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStage() {
     switch (_stage) {
       case _FigmaFlowStage.problemSolveWorkspace:
         return _buildProblemWorkspaceScreen(isRetryStage: false);
@@ -881,18 +1336,20 @@ class _ProblemScreenState extends State<ProblemScreen> {
     final hasEnteredAnswer =
         _directAnswerController.text.trim().isNotEmpty ||
         _selectedChoiceIndex != null;
-    final enteredLabel = _directAnswerController.text.trim().isNotEmpty
+    final enteredLabel = _selectedChoiceIndex != null
+        ? '선택한 답: ${_selectedChoiceIndex! + 1}번 (${_question.displayChoice(_selectedChoiceIndex!)})'
+        : _directAnswerController.text.trim().isNotEmpty
         ? '입력한 답: ${_directAnswerController.text.trim()}'
-        : (_selectedChoiceIndex != null
-              ? '선택한 답: ${_selectedChoiceIndex! + 1}번 (${_question.choices[_selectedChoiceIndex!]})'
-              : '그냥 정답 입력하기');
+        : _question.input.isChoice
+        ? '보기에서 답 선택하기'
+        : '그냥 정답 입력하기';
 
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
         leading: IconButton(
           onPressed: () {
-            if (isRetryStage) {
+            if (isRetryStage && !_serverMode) {
               setState(() {
                 _stage = _FigmaFlowStage.analysisResult;
               });
@@ -933,7 +1390,10 @@ class _ProblemScreenState extends State<ProblemScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
+                        Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          spacing: 12,
+                          runSpacing: 8,
                           children: [
                             Container(
                               padding: const EdgeInsets.symmetric(
@@ -957,9 +1417,15 @@ class _ProblemScreenState extends State<ProblemScreen> {
                                 ),
                               ),
                             ),
-                            const Spacer(),
                             Text(
-                              _question.isShortAnswer ? '단답·서술형' : '객관식',
+                              _question.isShortAnswer
+                                  ? '단답·서술형'
+                                  : [
+                                      'OX',
+                                      'TRUE_FALSE',
+                                    ].contains(_question.questionType)
+                                  ? 'OX'
+                                  : '객관식',
                               style: const TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
@@ -971,8 +1437,8 @@ class _ProblemScreenState extends State<ProblemScreen> {
                         const SizedBox(height: 10),
                         Text(
                           _isVariantMode
-                              ? '반지름이 5이고 (2, 1)을 중심으로 하는 원이 2x + y - k = 0에 의하여 잘린 현의 길이가 4√5일 때, 상수 k의 값을 구하시오.\n\n[연계 단원 문제] ${_question.question}'
-                              : _question.question,
+                              ? '반지름이 5이고 (2, 1)을 중심으로 하는 원이 2x + y - k = 0에 의하여 잘린 현의 길이가 4√5일 때, 상수 k의 값을 구하시오.\n\n[연계 단원 문제] ${_question.displayQuestion}'
+                              : _question.displayQuestion,
                           style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w800,
@@ -992,7 +1458,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
                               final selected = _selectedChoiceIndex == idx;
                               return ChoiceChip(
                                 label: Text(
-                                  '${idx + 1}) ${_question.choices[idx]}',
+                                  '${idx + 1}) ${_question.displayChoice(idx)}',
                                   style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: selected
@@ -1033,36 +1499,45 @@ class _ProblemScreenState extends State<ProblemScreen> {
                         children: [
                           Positioned.fill(
                             child: GestureDetector(
-                              onPanStart: (details) {
-                                setState(() {
-                                  _scribbleStrokes.add([details.localPosition]);
-                                });
+                              key: const ValueKey('scratchpad-surface'),
+                              behavior: HitTestBehavior.opaque,
+                              dragStartBehavior: DragStartBehavior.down,
+                              onPanStart: (details) =>
+                                  _startScratchpadStroke(details.localPosition),
+                              onPanUpdate: (details) => _updateScratchpadStroke(
+                                details.localPosition,
+                              ),
+                              onPanEnd: (_) => _endScratchpadStroke(),
+                              onPanCancel: _endScratchpadStroke,
+                              onTapUp: (details) {
+                                _startScratchpadStroke(details.localPosition);
+                                _endScratchpadStroke();
                               },
-                              onPanUpdate: (details) {
-                                setState(() {
-                                  _scribbleStrokes.last.add(
-                                    details.localPosition,
-                                  );
-                                });
-                              },
-                              child: CustomPaint(
-                                painter: _GridScratchpadPainter(
-                                  strokes: _scribbleStrokes,
+                              child: RepaintBoundary(
+                                key: const ValueKey('scratchpad-canvas'),
+                                child: CustomPaint(
+                                  painter: _GridScratchpadPainter(
+                                    strokes: _scribbleStrokes,
+                                  ),
                                 ),
                               ),
                             ),
                           ),
                           if (_scribbleStrokes.isEmpty)
-                            const Center(
-                              child: Padding(
-                                padding: EdgeInsets.symmetric(horizontal: 24),
-                                child: Text(
-                                  '모눈종이 연습장에 자유롭게 풀어보거나,\n공책에 푼 뒤 아래 [카메라 촬영] 또는 [그냥 정답 입력하기]를 선택하세요 ✍️',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Color(0xFF999999),
-                                    height: 1.5,
+                            IgnorePointer(
+                              child: Center(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 24),
+                                  child: Text(
+                                    _strokeEraser
+                                        ? '지울 획이 없어요. 펜을 선택해서 풀이를 적어 주세요.'
+                                        : '모눈종이 연습장에 자유롭게 풀어보거나,\n공책에 푼 뒤 아래 [카메라 촬영] 또는 [그냥 정답 입력하기]를 선택하세요 ✍️',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Color(0xFF999999),
+                                      height: 1.5,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -1075,9 +1550,14 @@ class _ProblemScreenState extends State<ProblemScreen> {
                               children: [
                                 if (_scribbleStrokes.isNotEmpty)
                                   IconButton(
-                                    tooltip: '연습장 필기 지우기',
+                                    tooltip: '연습장 전체 지우기',
+                                    key: const ValueKey('scratchpad-clear'),
                                     onPressed: () {
-                                      setState(() => _scribbleStrokes.clear());
+                                      setState(() {
+                                        _scribbleStrokes.clear();
+                                        _activeScribbleStroke = null;
+                                        _lastEraserPosition = null;
+                                      });
                                     },
                                     icon: const Icon(
                                       Icons.delete_outline_rounded,
@@ -1085,12 +1565,46 @@ class _ProblemScreenState extends State<ProblemScreen> {
                                       color: _mutedColor,
                                     ),
                                   ),
-                                const Padding(
-                                  padding: EdgeInsets.all(6),
-                                  child: Icon(
+                                IconButton(
+                                  tooltip: '펜으로 쓰기',
+                                  key: const ValueKey('scratchpad-pen'),
+                                  isSelected: !_strokeEraser,
+                                  onPressed: () => _selectScratchpadTool(false),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: !_strokeEraser
+                                        ? _lightPurple
+                                        : Colors.transparent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  icon: Icon(
                                     Icons.edit_note_rounded,
                                     size: 22,
-                                    color: _textColor,
+                                    color: !_strokeEraser
+                                        ? _purple
+                                        : _mutedColor,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  tooltip: '획 지우개',
+                                  key: const ValueKey('scratchpad-eraser'),
+                                  isSelected: _strokeEraser,
+                                  onPressed: () => _selectScratchpadTool(true),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: _strokeEraser
+                                        ? _lightPurple
+                                        : Colors.transparent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  icon: CustomPaint(
+                                    size: const Size(22, 22),
+                                    painter: _StrokeEraserIconPainter(
+                                      _strokeEraser ? _purple : _mutedColor,
+                                    ),
                                   ),
                                 ),
                               ],
@@ -1106,13 +1620,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          // 처음 촬영할 때는 오개념 분석 플로우 시연, 다시 풀기 후 재촬영할 때는 정답 완료 플로우 시연
-                          _simulatePerfectFirstTry = isRetryStage;
-                          _stage = _FigmaFlowStage.cameraCapture;
-                        });
-                      },
+                      onPressed: _openPhotoCapture,
                       icon: const Icon(Icons.camera_alt_rounded, size: 20),
                       label: Text(
                         isRetryStage
@@ -1193,9 +1701,9 @@ class _ProblemScreenState extends State<ProblemScreen> {
                               borderRadius: BorderRadius.circular(14),
                             ),
                           ),
-                          child: const Text(
-                            '제출하기',
-                            style: TextStyle(
+                          child: Text(
+                            _serverAttempt != null ? '결과 다시 보기' : '제출하기',
+                            style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w800,
                             ),
@@ -1203,6 +1711,19 @@ class _ProblemScreenState extends State<ProblemScreen> {
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _openProblemHelp,
+                      icon: const Icon(Icons.lightbulb_outline_rounded),
+                      label: const Text('모르겠어요'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFB45309),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1216,207 +1737,14 @@ class _ProblemScreenState extends State<ProblemScreen> {
   // =========================================================================
   // 1. 공책 풀이 촬영 화면 (피그마 1-1: 다크 카메라 + 주황빨강 브래킷 + 중앙 점선)
   // =========================================================================
-  Widget _buildCameraCaptureScreen() {
-    return Scaffold(
-      backgroundColor: const Color(0xFF141414),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF757575),
-        foregroundColor: Colors.black,
-        leading: IconButton(
-          onPressed: () {
-            // 앱 제공 문제에서 카메라로 들어온 경우 문제 풀이 화면으로 복귀
-            if (!widget.startWithCamera) {
-              setState(() {
-                _stage = _FigmaFlowStage.problemSolveWorkspace;
-              });
-            } else {
-              Navigator.of(context).pop();
-            }
-          },
-          icon: const Icon(Icons.chevron_left_rounded, size: 28),
-        ),
-        title: const Text(
-          '공책 풀이 촬영',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
-        ),
-        actions: [
-          // 시연 시 '오류 발견 플로우' vs '완벽 풀이 즉시 완료 모달' 전환 토글
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: Center(
-              child: FilterChip(
-                label: Text(
-                  _simulatePerfectFirstTry ? '시연: 한번에 정답' : '시연: 오개념 발견',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                selected: _simulatePerfectFirstTry,
-                onSelected: (v) => setState(() => _simulatePerfectFirstTry = v),
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 540),
-            child: Column(
-              children: [
-                const Spacer(),
-                // 중앙 가이드라인 박스 (주황/빨강 모서리 브래킷 + 가로 점선)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 22),
-                  child: AspectRatio(
-                    aspectRatio: 1.25,
-                    child: CustomPaint(
-                      painter: _CameraGuideFramePainter(
-                        bracketColor: _guideOrangeRed,
-                      ),
-                      child: Container(
-                        color: const Color(0xFF333333),
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            Text(
-                              '[상단] 문제 영역\n${_question.question}',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 13,
-                                height: 1.4,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              '[하단] 내가 푼 손글씨 수식 영역\n(한 문제와 풀이가 모두 보이도록 맞춰주세요)',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white54,
-                                fontSize: 12,
-                                height: 1.4,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const Spacer(),
-                const Text(
-                  '가이드라인 안에 수식을 맞춰주세요',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 28),
-                // 하단 원형 셔터 버튼
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(vertical: 22),
-                  color: Colors.black,
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: () {
-                        setState(() {
-                          _stage = _FigmaFlowStage.imageConfirm;
-                        });
-                      },
-                      child: Container(
-                        width: 68,
-                        height: 68,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF666666),
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: const Color(0xFF444444),
-                            width: 4,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _buildCameraCaptureScreen() => CaptureLearningScreen(
+    problem: _serverMode ? _question : null,
+    sessionId: _serverSession,
+    service: CaptureService(repository: _repository),
+  );
 
-  // =========================================================================
-  // 2. 이미지 확인 화면 (피그마 1-2: 촬영된 공책 이미지 + 하단 [재촬영] / [다음 ->])
-  // =========================================================================
-  Widget _buildImageConfirmScreen() {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 540),
-            child: Column(
-              children: [
-                const SizedBox(height: 24),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: _buildSimulatedNotebookPhoto(showPins: false),
-                  ),
-                ),
-                Container(
-                  height: 84,
-                  padding: const EdgeInsets.symmetric(horizontal: 28),
-                  color: Colors.black,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _stage = _FigmaFlowStage.cameraCapture;
-                          });
-                        },
-                        child: const Text(
-                          '재촬영',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: _startUfoAnalysis,
-                        child: const Text(
-                          '다음 →',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _buildImageConfirmScreen() => _buildCameraCaptureScreen();
 
-  // =========================================================================
-  // 3. 분석 로딩 화면 (피그마 1-3: "와아앙~" UFO 스캐닝 일러스트 + 안내 문구)
-  // =========================================================================
   Widget _buildUfoLoadingScreen() {
     return Scaffold(
       backgroundColor: Colors.white,
@@ -2312,9 +2640,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
                     children: [
                       IconButton(
                         onPressed: () {
-                          setState(() {
-                            _stage = _FigmaFlowStage.cameraCapture;
-                          });
+                          _openPhotoCapture();
                         },
                         icon: const Icon(
                           Icons.camera_alt_rounded,
@@ -2403,7 +2729,7 @@ class _ProblemScreenState extends State<ProblemScreen> {
     );
   }
 
-  /// [그냥 정답 입력하기] 바텀시트 (객관식 보기 선택 + 주관식/단답형 텍스트 입력 모두 지원)
+  /// 정답 입력 시트.
   Future<void> _openAnswerInputDialog({
     required bool autoSubmitAfterConfirm,
     required bool isRetryStage,
@@ -2429,36 +2755,41 @@ class _ProblemScreenState extends State<ProblemScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
-                      const Text(
-                        '정답 직접 입력하기',
-                        style: TextStyle(
+                      Text(
+                        _question.input.isChoice
+                            ? '보기에서 정답 선택하기'
+                            : '정답 직접 입력하기',
+                        style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
-                      TextButton(
-                        onPressed: () {
-                          // 시연 시 1초 만에 정답을 채울 수 있는 빠른 입력 도우미
-                          _directAnswerController.text =
-                              _question.correctAnswer;
-                          if (!_question.isShortAnswer) {
-                            _selectedChoiceIndex = _question.correctIndex;
-                          }
-                          setModalState(() {});
-                          setState(() {});
-                        },
-                        child: Text(
-                          '예시 정답(${_question.correctAnswer}) 자동입력',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: _purple,
+                      if (!_serverMode)
+                        TextButton(
+                          onPressed: () {
+                            // 시연 시 1초 만에 정답을 채울 수 있는 빠른 입력 도우미
+                            _directAnswerController.text =
+                                _question.correctAnswer;
+                            if (!_question.isShortAnswer) {
+                              _selectedChoiceIndex = _question.correctIndex;
+                            }
+                            setModalState(() {});
+                            setState(() {});
+                          },
+                          child: Text(
+                            '예시 정답(${_question.correctAnswer}) 자동입력',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: _purple,
+                            ),
                           ),
                         ),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 10),
@@ -2479,7 +2810,9 @@ class _ProblemScreenState extends State<ProblemScreen> {
                       children: List.generate(_question.choices.length, (idx) {
                         final selected = _selectedChoiceIndex == idx;
                         return ChoiceChip(
-                          label: Text('${idx + 1}번: ${_question.choices[idx]}'),
+                          label: Text(
+                            '${idx + 1}번: ${_question.displayChoice(idx)}',
+                          ),
                           selected: selected,
                           selectedColor: _lightPurple,
                           onSelected: (_) {
@@ -2495,38 +2828,63 @@ class _ProblemScreenState extends State<ProblemScreen> {
                     ),
                     const SizedBox(height: 12),
                   ],
-                  TextField(
-                    controller: _directAnswerController,
-                    autofocus: _question.isShortAnswer,
-                    decoration: InputDecoration(
-                      labelText: '구한 정답 입력',
-                      hintText: '구한 답을 입력하세요 (예: ${_question.correctAnswer})',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
+                  if (!_question.input.isChoice)
+                    TextField(
+                      controller: _directAnswerController,
+                      inputFormatters: _question.input.isNumeric
+                          ? [NumericAnswerFormatter()]
+                          : null,
+                      autocorrect: !_question.input.isNumeric,
+                      autofocus: _question.isShortAnswer,
+                      decoration: InputDecoration(
+                        labelText: _question.input.isNumeric
+                            ? '숫자 답안'
+                            : '구한 정답 입력',
+                        hintText: _serverMode
+                            ? _question.input.isNumeric
+                                  ? '예: -2, 0.5, 3/2 (분수는 기약분수)'
+                                  : '구한 답을 입력하세요'
+                            : '구한 답을 입력하세요 (예: ${_question.correctAnswer})',
+                        helperText:
+                            _question.inputGuidance?.trim().isNotEmpty == true
+                            ? _question.inputGuidance
+                            : _question.input.isNumeric
+                            ? null
+                            : mathInputGuide,
+                        helperMaxLines: 2,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
+                      onChanged: (val) {
+                        final trimmed = val.trim();
+                        if (!_question.isShortAnswer) {
+                          final matchIdx = _question.choices.indexWhere(
+                            (c) => c.trim() == trimmed,
+                          );
+                          _selectedChoiceIndex = matchIdx >= 0
+                              ? matchIdx
+                              : null;
+                        }
+                        setModalState(() {});
+                        setState(() {});
+                      },
                     ),
-                    onChanged: (val) {
-                      final trimmed = val.trim();
-                      if (!_question.isShortAnswer) {
-                        final matchIdx = _question.choices.indexWhere(
-                          (c) => c.trim() == trimmed,
-                        );
-                        _selectedChoiceIndex = matchIdx >= 0 ? matchIdx : null;
-                      }
-                      setModalState(() {});
-                      setState(() {});
-                    },
-                  ),
                   const SizedBox(height: 14),
                   ElevatedButton(
-                    onPressed: () {
-                      Navigator.of(sheetContext).pop();
-                      if (autoSubmitAfterConfirm &&
-                          (_directAnswerController.text.trim().isNotEmpty ||
-                              _selectedChoiceIndex != null)) {
-                        _handleDirectSubmit(isRetryStage: isRetryStage);
-                      }
-                    },
+                    onPressed:
+                        _question.input.isChoice && _selectedChoiceIndex == null
+                        ? null
+                        : () {
+                            Navigator.of(sheetContext).pop();
+                            if (autoSubmitAfterConfirm &&
+                                (_directAnswerController.text
+                                        .trim()
+                                        .isNotEmpty ||
+                                    _selectedChoiceIndex != null)) {
+                              _handleDirectSubmit(isRetryStage: isRetryStage);
+                            }
+                          },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _purple,
                       foregroundColor: Colors.white,
@@ -2554,88 +2912,6 @@ class _ProblemScreenState extends State<ProblemScreen> {
 }
 
 /// 피그마 1-1: 카메라 가이드 프레임 (주황/빨강 4모서리 브래킷 + 중앙 가로 점선)
-class _CameraGuideFramePainter extends CustomPainter {
-  final Color bracketColor;
-
-  const _CameraGuideFramePainter({required this.bracketColor});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final borderPaint = Paint()
-      ..color = Colors.white54
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
-
-    canvas.drawRect(Offset.zero & size, borderPaint);
-
-    // 중앙 가로 점선
-    final dashPaint = Paint()
-      ..color = Colors.white38
-      ..strokeWidth = 1.0;
-    const dashWidth = 4.0;
-    const dashSpace = 4.0;
-    double startX = 0;
-    final centerY = size.height / 2;
-    while (startX < size.width) {
-      canvas.drawLine(
-        Offset(startX, centerY),
-        Offset((startX + dashWidth).clamp(0, size.width), centerY),
-        dashPaint,
-      );
-      startX += dashWidth + dashSpace;
-    }
-
-    // 4개 모서리 주황/빨강 L자 브래킷
-    final bracketPaint = Paint()
-      ..color = bracketColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.5
-      ..strokeCap = StrokeCap.square;
-
-    const len = 24.0;
-    // 좌상단
-    canvas.drawLine(const Offset(0, 0), const Offset(len, 0), bracketPaint);
-    canvas.drawLine(const Offset(0, 0), const Offset(0, len), bracketPaint);
-    // 우상단
-    canvas.drawLine(
-      Offset(size.width - len, 0),
-      Offset(size.width, 0),
-      bracketPaint,
-    );
-    canvas.drawLine(
-      Offset(size.width, 0),
-      Offset(size.width, len),
-      bracketPaint,
-    );
-    // 좌하단
-    canvas.drawLine(
-      Offset(0, size.height - len),
-      Offset(0, size.height),
-      bracketPaint,
-    );
-    canvas.drawLine(
-      Offset(0, size.height),
-      Offset(len, size.height),
-      bracketPaint,
-    );
-    // 우하단
-    canvas.drawLine(
-      Offset(size.width - len, size.height),
-      Offset(size.width, size.height),
-      bracketPaint,
-    );
-    canvas.drawLine(
-      Offset(size.width, size.height - len),
-      Offset(size.width, size.height),
-      bracketPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _CameraGuideFramePainter oldDelegate) => false;
-}
-
-/// 피그마 2-4: 모눈종이 격자 배경 + 학생 손글씨 드로잉 스트로크 페인터
 class _GridScratchpadPainter extends CustomPainter {
   final List<List<Offset>> strokes;
 
@@ -2662,6 +2938,9 @@ class _GridScratchpadPainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
 
     for (final stroke in strokes) {
+      if (stroke.length == 1) {
+        canvas.drawCircle(stroke.single, 1.3, Paint()..color = penPaint.color);
+      }
       for (var i = 0; i < stroke.length - 1; i++) {
         canvas.drawLine(stroke[i], stroke[i + 1], penPaint);
       }
@@ -2670,4 +2949,35 @@ class _GridScratchpadPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _GridScratchpadPainter oldDelegate) => true;
+}
+
+class _StrokeEraserIconPainter extends CustomPainter {
+  final Color color;
+  const _StrokeEraserIconPainter(this.color);
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 24, size.height / 24);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round;
+    canvas.drawPath(
+      Path()
+        ..moveTo(14, 3)
+        ..lineTo(22, 11)
+        ..lineTo(11, 22)
+        ..lineTo(6, 22)
+        ..lineTo(1, 17)
+        ..close(),
+      paint,
+    );
+    canvas.drawLine(const Offset(7, 11), const Offset(16, 20), paint);
+    canvas.drawLine(const Offset(11, 22), const Offset(23, 22), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _StrokeEraserIconPainter oldDelegate) =>
+      oldDelegate.color != color;
 }

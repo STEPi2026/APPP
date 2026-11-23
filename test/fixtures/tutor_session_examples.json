@@ -1,0 +1,450 @@
+[
+  {
+    "key": "null",
+    "title": "사진(풀이 포함) 시작: 분석이 먼저 필요",
+    "request": {
+      "scenario": "PHOTO_SOLVED",
+      "action": "START",
+      "captured_problem_id": 31
+    },
+    "response": {
+      "event_id": 1,
+      "scenario": "PHOTO_SOLVED",
+      "action": "START",
+      "problem_id": null,
+      "captured_problem_id": 31,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "AI1_ANALYZE_REQUIRED",
+      "message": "확인된 학생 풀이를 Backend에서 AI1 분석으로 전달해주세요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": null,
+      "solved": false,
+      "next_action": null,
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "next_action이 null이고 status가 AI1_ANALYZE_REQUIRED이면 기존 사진 분석(POST /captured-problems/31/analyze)을 먼저 하고, 끝나면 같은 사진으로 ANALYZE_RESULT를 보냅니다."
+  },
+  {
+    "key": "RELEARN",
+    "title": "사진 분석 결과: 확정 오답 → 재학습",
+    "request": {
+      "scenario": "PHOTO_SOLVED",
+      "action": "ANALYZE_RESULT",
+      "captured_problem_id": 31
+    },
+    "response": {
+      "event_id": 2,
+      "scenario": "PHOTO_SOLVED",
+      "action": "ANALYZE_RESULT",
+      "problem_id": null,
+      "captured_problem_id": 31,
+      "attempt_id": 88,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "COMPLETE_INCORRECT",
+      "message": "최종 답을 제출했지만 확인이 필요한 오류가 있어요. 개념을 복습하고 다시 도전해보세요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": false,
+      "solved": false,
+      "next_action": "RELEARN",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "RELEARN 버튼(다른 문제로 다시 풀기) → 같은 사진으로 action RELEARN을 보냅니다. 개념(concept)을 함께 보여 주면 좋습니다."
+  },
+  {
+    "key": "CHECK_ANSWER (다음 문제)",
+    "title": "재학습 문제 받기",
+    "request": {
+      "scenario": "PHOTO_SOLVED",
+      "action": "RELEARN",
+      "captured_problem_id": 31
+    },
+    "response": {
+      "event_id": 3,
+      "scenario": "PHOTO_SOLVED",
+      "action": "RELEARN",
+      "problem_id": null,
+      "captured_problem_id": 31,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "PROVIDED",
+      "message": "같은 원리를 적용하는 문제를 준비했어요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": null,
+      "solved": false,
+      "next_action": "CHECK_ANSWER",
+      "next_skill": null,
+      "next_problem": {
+        "id": 39,
+        "problem_code": "PRB-1-039",
+        "skill_code": "SKL-1-004",
+        "prompt": "(3x-2)(x+5)를 전개했을 때 x의 계수를 구하시오.",
+        "difficulty": 1
+      },
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "next_problem을 보여 주고, 답을 받으면 scenario RECOMMENDED, problem_id = next_problem.id(39), action CHECK_ANSWER로 보냅니다."
+  },
+  {
+    "key": "CHECK_ANSWER (힌트)",
+    "title": "추천 문제 힌트",
+    "request": {
+      "scenario": "RECOMMENDED",
+      "action": "HINT",
+      "problem_id": 37
+    },
+    "response": {
+      "event_id": 4,
+      "scenario": "RECOMMENDED",
+      "action": "HINT",
+      "problem_id": 37,
+      "captured_problem_id": null,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "PROVIDED",
+      "message": "앞 괄호의 각 항을 뒤 괄호의 모든 항에 곱하며 시작해요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": "앞 괄호의 각 항을 뒤 괄호의 모든 항에 곱하며 시작해요.",
+      "hint_level": 1,
+      "solution": null,
+      "answer_correct": null,
+      "solved": false,
+      "next_action": "CHECK_ANSWER",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "hint를 보여 주고 답 입력창을 엽니다. 힌트를 다시 누르면 같은 요청을 보냅니다(Backend가 횟수를 세어 2·3단계 힌트, 그다음 개념 복습)."
+  },
+  {
+    "key": "NEXT_SKILL",
+    "title": "정답 → 다음 Skill",
+    "request": {
+      "scenario": "RECOMMENDED",
+      "action": "CHECK_ANSWER",
+      "problem_id": 37,
+      "answer": "5",
+      "session_id": 12,
+      "request_id": "app-7-0001"
+    },
+    "response": {
+      "event_id": 5,
+      "scenario": "RECOMMENDED",
+      "action": "CHECK_ANSWER",
+      "problem_id": 37,
+      "captured_problem_id": null,
+      "attempt_id": 89,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "GRADED",
+      "message": "도움을 활용해 답을 확인했어요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": true,
+      "solved": true,
+      "next_action": "NEXT_SKILL",
+      "next_skill": {
+        "skill_code": "SKL-1-005",
+        "name": "전개식 정리하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": {
+        "xp": 0,
+        "level_up": false,
+        "new_badges": [],
+        "completed_quests": []
+      }
+    },
+    "after": "next_skill(코드·이름·개념)을 보여 주고, 그 Skill의 추천 문제(GET /problems?skill_code=SKL-1-005)로 넘어갑니다. 힌트를 쓴 정답이라 XP는 없습니다(rewards.xp 0)."
+  },
+  {
+    "key": "SHOW_SOLUTION",
+    "title": "'못 풀겠어요'(포기)",
+    "request": {
+      "scenario": "RECOMMENDED",
+      "action": "GIVE_UP",
+      "problem_id": 39
+    },
+    "response": {
+      "event_id": 6,
+      "scenario": "RECOMMENDED",
+      "action": "GIVE_UP",
+      "problem_id": 39,
+      "captured_problem_id": null,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "PROVIDED",
+      "message": "이번 문제를 넘겼어요. 원하면 해설을 확인하거나 개념을 복습한 뒤 다시 도전할 수 있어요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": null,
+      "solved": false,
+      "next_action": "SHOW_SOLUTION",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "해설 보기 버튼 → action SHOW_SOLUTION. 포기는 오답노트·숙련도·XP에 들어가지 않습니다."
+  },
+  {
+    "key": "RELEARN (해설 후)",
+    "title": "해설 보기",
+    "request": {
+      "scenario": "RECOMMENDED",
+      "action": "SHOW_SOLUTION",
+      "problem_id": 39
+    },
+    "response": {
+      "event_id": 7,
+      "scenario": "RECOMMENDED",
+      "action": "SHOW_SOLUTION",
+      "problem_id": 39,
+      "captured_problem_id": null,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "PROVIDED",
+      "message": "풀이를 확인한 뒤에는 다른 확인문제를 직접 풀어보세요. 해설 열람만으로 숙련도는 오르지 않습니다.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": {
+        "answer": "13",
+        "answer_display": "13",
+        "answer_form": "integer",
+        "steps": [
+          "(3x-2)(x+5)를 분배법칙으로 전개합니다.",
+          "3x·x = 3x², 3x·5 = 15x, (-2)·x = -2x, (-2)·5 = -10",
+          "x항을 모으면 15x-2x = 13x이므로 x의 계수는 13입니다."
+        ],
+        "verification_method": "approved-reference",
+        "mathematically_verified": false
+      },
+      "answer_correct": null,
+      "solved": false,
+      "next_action": "RELEARN",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "solution.steps(해설 본문)와 solution.answer_display(학생용 정답 표기)를 보여 줍니다. solution.answer는 채점용 표기라 화면에 쓰지 않습니다. 다음은 RELEARN."
+  },
+  {
+    "key": "CONFIRM_INPUT",
+    "title": "사진(문제만) 시작: 문제 확인 필요",
+    "request": {
+      "scenario": "PROBLEM_ONLY",
+      "action": "START",
+      "captured_problem_id": 32,
+      "skill_code": "SKL-1-004"
+    },
+    "response": {
+      "event_id": 8,
+      "scenario": "PROBLEM_ONLY",
+      "action": "START",
+      "problem_id": null,
+      "captured_problem_id": 32,
+      "attempt_id": null,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "USER_CONFIRMATION",
+      "message": "촬영한 문제와 풀이를 확인·수정해주세요. 아직 채점이나 숙련도 반영을 하지 않습니다.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": null,
+      "solved": false,
+      "next_action": "CONFIRM_INPUT",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": null
+    },
+    "after": "문제만 찍은 사진은 분석 기록이 없어 skill_code가 필요합니다. OCR 확인 화면을 다시 보여 주고(PATCH /captured-problems/32/ocr로 식 확정), 확정 후 같은 요청을 다시 보냅니다."
+  },
+  {
+    "key": "LEARNING_COMPLETE",
+    "title": "정답 → 경로 완료",
+    "request": {
+      "scenario": "RECOMMENDED",
+      "action": "CHECK_ANSWER",
+      "problem_id": 39,
+      "answer": "13",
+      "session_id": 12
+    },
+    "response": {
+      "event_id": 9,
+      "scenario": "RECOMMENDED",
+      "action": "CHECK_ANSWER",
+      "problem_id": 39,
+      "captured_problem_id": null,
+      "attempt_id": 90,
+      "skill": {
+        "skill_code": "SKL-1-004",
+        "name": "다항식의 곱 전개하기",
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈"
+      },
+      "status": "GRADED",
+      "message": "직접 해결했어요. 준비된 학습 경로를 모두 마쳤어요.",
+      "concept": {
+        "concept_code": "STP-1-002",
+        "concept_name": "다항식의 곱셈",
+        "skill_code": "SKL-1-004",
+        "explanation_easy": "앞 괄호의 모든 항을 뒤 괄호의 모든 항과 한 번씩 곱한 뒤 같은 항끼리 모아요.",
+        "explanation": "분배법칙으로 각 항의 곱을 빠짐없이 구하고 동류항을 정리합니다. 계수의 부호와 문자의 지수 계산에 주의합니다.",
+        "example": "(x+2)(x+3)=x²+3x+2x+6=x²+5x+6입니다."
+      },
+      "prerequisite_concept": null,
+      "hint": null,
+      "hint_level": null,
+      "solution": null,
+      "answer_correct": true,
+      "solved": true,
+      "next_action": "LEARNING_COMPLETE",
+      "next_skill": null,
+      "next_problem": null,
+      "approved_videos": [],
+      "rewards": {
+        "xp": 15,
+        "level_up": false,
+        "new_badges": [],
+        "completed_quests": [
+          {
+            "code": "DAILY_SOLVE_3",
+            "title": "문제 3개 풀기"
+          }
+        ]
+      }
+    },
+    "after": "완료 화면을 보여 줍니다. 힌트·해설 없이 맞혀서 XP가 지급됩니다(rewards). 학습 경로 화면(로드맵)으로 돌아갑니다."
+  }
+]
